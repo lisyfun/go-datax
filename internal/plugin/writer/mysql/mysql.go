@@ -49,7 +49,8 @@ func NewMySQLWriter(parameter *Parameter) *MySQLWriter {
 
 // Connect 连接MySQL数据库
 func (w *MySQLWriter) Connect() error {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+	// 在 DSN 中设置更大的 maxAllowedPacket
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
 		w.Parameter.Username,
 		w.Parameter.Password,
 		w.Parameter.Host,
@@ -62,15 +63,27 @@ func (w *MySQLWriter) Connect() error {
 		return fmt.Errorf("连接MySQL失败: %v", err)
 	}
 
-	// 设置连接池配置
-	db.SetMaxIdleConns(5)
-	db.SetMaxOpenConns(10)
-	db.SetConnMaxLifetime(time.Hour)
+	// 优化连接池配置
+	db.SetMaxIdleConns(24)                  // 最小空闲连接数
+	db.SetMaxOpenConns(50)                  // 最大连接数
+	db.SetConnMaxLifetime(time.Hour)        // 连接最大生命周期
+	db.SetConnMaxIdleTime(30 * time.Minute) // 空闲连接最大生命周期
 
 	// 测试连接
 	err = db.Ping()
 	if err != nil {
 		return fmt.Errorf("ping MySQL失败: %v", err)
+	}
+
+	// 设置会话变量以优化写入性能（只设置会话级别的变量）
+	_, err = db.Exec(`
+		SET SESSION
+		unique_checks = 0,
+		foreign_key_checks = 0,
+		sql_mode = ''
+	`)
+	if err != nil {
+		log.Printf("设置会话变量失败: %v", err)
 	}
 
 	w.DB = db
@@ -199,10 +212,16 @@ func (w *MySQLWriter) Write(records []map[string]interface{}) error {
 		return nil
 	}
 
-	// 计算每批次最大记录数（考虑到MySQL占位符限制）
-	maxBatchSize := 65000 / len(w.Parameter.Columns)
-	if maxBatchSize > w.Parameter.BatchSize {
-		maxBatchSize = w.Parameter.BatchSize
+	// 计算每批次最大记录数，考虑MySQL占位符限制
+	columnCount := len(w.Parameter.Columns)
+	maxPlaceholders := 65535 // MySQL最大占位符数量
+	maxBatchByPlaceholders := maxPlaceholders / columnCount
+
+	// 使用较小的值作为批次大小
+	maxBatchSize := w.Parameter.BatchSize
+	if maxBatchByPlaceholders < maxBatchSize {
+		maxBatchSize = maxBatchByPlaceholders
+		log.Printf("由于MySQL占位符限制，调整批次大小为: %d", maxBatchSize)
 	}
 
 	totalBatches := (len(records) + maxBatchSize - 1) / maxBatchSize
@@ -211,38 +230,135 @@ func (w *MySQLWriter) Write(records []map[string]interface{}) error {
 	// 创建错误通道和完成通道
 	errChan := make(chan error, totalBatches)
 	doneChan := make(chan bool, totalBatches)
+	stopChan := make(chan struct{}) // 用于通知所有工作协程停止
+	defer close(stopChan)
 
-	// 创建工作通道，限制并发数
-	workerCount := 10 // 设置合适的并发数
+	// 使用配置的channel数作为工作协程数
+	workerCount := 24 // 与配置文件中的channel数保持一致
 	workChan := make(chan []map[string]interface{}, workerCount)
+
+	// 预先构建SQL模板
+	insertPrefix := w.buildInsertPrefix()
 
 	// 启动工作协程
 	for i := 0; i < workerCount; i++ {
-		go func() {
-			for batch := range workChan {
-				if err := w.writeBatch(batch); err != nil {
-					errChan <- err
-				} else {
+		go func(workerID int) {
+			// 每个工作协程创建自己的事务
+			tx, err := w.DB.Begin()
+			if err != nil {
+				errChan <- fmt.Errorf("工作协程 %d 开始事务失败: %v", workerID, err)
+				return
+			}
+			defer tx.Rollback() // 确保在出错时回滚
+
+			// 预分配缓冲区
+			var sqlBuilder strings.Builder
+			sqlBuilder.Grow(1024 * 1024) // 预分配1MB的buffer
+			valueArgs := make([]interface{}, 0, maxBatchSize*columnCount)
+
+			batchCount := 0
+			totalRecords := 0
+
+			for {
+				select {
+				case <-stopChan:
+					return
+				case batch, ok := <-workChan:
+					if !ok {
+						// 提交最后的事务
+						if batchCount > 0 {
+							if err := tx.Commit(); err != nil {
+								errChan <- fmt.Errorf("工作协程 %d 提交最终事务失败: %v", workerID, err)
+							}
+						}
+						return
+					}
+
+					sqlBuilder.Reset()
+					sqlBuilder.WriteString(insertPrefix)
+					valueArgs = valueArgs[:0]
+
+					// 构建批量插入值
+					for i, record := range batch {
+						if i > 0 {
+							sqlBuilder.WriteByte(',')
+						}
+						sqlBuilder.WriteString("ROW(")
+						for j, col := range w.Parameter.Columns {
+							if j > 0 {
+								sqlBuilder.WriteByte(',')
+							}
+							sqlBuilder.WriteByte('?')
+							valueArgs = append(valueArgs, record[col])
+						}
+						sqlBuilder.WriteByte(')')
+					}
+
+					// 执行批量写入
+					if _, err := tx.Exec(sqlBuilder.String(), valueArgs...); err != nil {
+						errChan <- fmt.Errorf("工作协程 %d 执行写入失败: %v", workerID, err)
+						return
+					}
+
+					totalRecords += len(batch)
+					batchCount++
+
+					// 每处理50个批次或累计100万条记录提交一次事务
+					if batchCount >= 50 || totalRecords >= 1000000 {
+						if err := tx.Commit(); err != nil {
+							errChan <- fmt.Errorf("工作协程 %d 提交事务失败: %v", workerID, err)
+							return
+						}
+						// 开启新事务
+						tx, err = w.DB.Begin()
+						if err != nil {
+							errChan <- fmt.Errorf("工作协程 %d 开始新事务失败: %v", workerID, err)
+							return
+						}
+						batchCount = 0
+						totalRecords = 0
+					}
+
 					doneChan <- true
 				}
 			}
-		}()
+		}(i)
 	}
 
 	// 分批发送数据到工作通道
+	startTime := time.Now()
+	lastLogTime := startTime
+
+	// 使用超时控制
+	timeout := time.After(30 * time.Minute) // 设置30分钟超时
+
 	go func() {
+		defer close(workChan)
 		for i := 0; i < len(records); i += maxBatchSize {
 			end := i + maxBatchSize
 			if end > len(records) {
 				end = len(records)
 			}
-			currentBatch := (i / maxBatchSize) + 1
-			log.Printf("正在处理第 %d/%d 批, 记录数: %d", currentBatch, totalBatches, end-i)
 
-			batch := records[i:end]
-			workChan <- batch
+			select {
+			case <-stopChan:
+				return
+			case workChan <- records[i:end]:
+				// 每秒最多输出一次进度日志
+				now := time.Now()
+				if now.Sub(lastLogTime) >= time.Second {
+					elapsed := now.Sub(startTime)
+					speed := float64(i+maxBatchSize) / elapsed.Seconds()
+					progress := float64(i+maxBatchSize) / float64(len(records)) * 100
+					log.Printf("进度: %.2f%%, 记录数: %d/%d, 速度: %.2f 条/秒",
+						progress, i+maxBatchSize, len(records), speed)
+					lastLogTime = now
+				}
+			case <-timeout:
+				log.Printf("数据同步超时")
+				return
+			}
 		}
-		close(workChan)
 	}()
 
 	// 等待所有批次处理完成
@@ -257,59 +373,25 @@ func (w *MySQLWriter) Write(records []map[string]interface{}) error {
 			completedBatches++
 		case <-doneChan:
 			completedBatches++
-			log.Printf("完成批次: %d/%d", completedBatches, totalBatches)
+		case <-timeout:
+			return fmt.Errorf("数据同步超时")
 		}
 	}
+
+	elapsed := time.Since(startTime)
+	speed := float64(len(records)) / elapsed.Seconds()
+	log.Printf("同步完成，总耗时: %.2f秒, 平均速度: %.2f 条/秒",
+		elapsed.Seconds(), speed)
 
 	if firstErr != nil {
 		return firstErr
 	}
 
-	log.Printf("所有批次执行完成，共写入 %d 条记录", len(records))
 	return nil
 }
 
-// writeBatch 写入一批数据
-func (w *MySQLWriter) writeBatch(records []map[string]interface{}) error {
-	// 构建插入SQL
-	query := w.buildInsertSQL()
-
-	// 准备值
-	valueStrings := make([]string, 0, len(records))
-	valueArgs := make([]interface{}, 0, len(records)*len(w.Parameter.Columns))
-
-	for _, record := range records {
-		placeholders := make([]string, len(w.Parameter.Columns))
-		for i := range w.Parameter.Columns {
-			placeholders[i] = "?"
-		}
-		valueStrings = append(valueStrings, "("+strings.Join(placeholders, ",")+")")
-
-		for _, col := range w.Parameter.Columns {
-			valueArgs = append(valueArgs, record[col])
-		}
-	}
-
-	// 完成SQL语句
-	query = fmt.Sprintf(query, strings.Join(valueStrings, ","))
-
-	// 执行写入
-	var err error
-	if w.tx != nil {
-		_, err = w.tx.Exec(query, valueArgs...)
-	} else {
-		_, err = w.DB.Exec(query, valueArgs...)
-	}
-
-	if err != nil {
-		return fmt.Errorf("执行写入失败: %v", err)
-	}
-
-	return nil
-}
-
-// buildInsertSQL 构建插入SQL语句
-func (w *MySQLWriter) buildInsertSQL() string {
+// buildInsertPrefix 构建插入SQL前缀
+func (w *MySQLWriter) buildInsertPrefix() string {
 	var columns []string
 	for _, col := range w.Parameter.Columns {
 		columns = append(columns, "`"+col+"`")
@@ -323,7 +405,7 @@ func (w *MySQLWriter) buildInsertSQL() string {
 		action = "INSERT"
 	}
 
-	return fmt.Sprintf("%s INTO `%s` (%s) VALUES %%s",
+	return fmt.Sprintf("%s INTO `%s` (%s) VALUES ",
 		action,
 		w.Parameter.Table,
 		strings.Join(columns, ","),
@@ -335,7 +417,18 @@ func (w *MySQLWriter) Close() error {
 	if w.tx != nil {
 		w.RollbackTransaction()
 	}
+
+	// 恢复会话变量
 	if w.DB != nil {
+		_, err := w.DB.Exec(`
+			SET SESSION
+			unique_checks = 1,
+			foreign_key_checks = 1
+		`)
+		if err != nil {
+			log.Printf("恢复会话变量失败: %v", err)
+		}
+
 		return w.DB.Close()
 	}
 	return nil
