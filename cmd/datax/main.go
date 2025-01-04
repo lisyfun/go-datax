@@ -8,12 +8,14 @@ import (
 	"log"
 
 	"datax/internal/core"
-	mysqlreader "datax/internal/plugin/reader/mysql"
-	mysqlwriter "datax/internal/plugin/writer/mysql"
+	"datax/internal/plugin/reader/mysql"
+	pgReader "datax/internal/plugin/reader/postgresql"
+	mysqlWriter "datax/internal/plugin/writer/mysql"
+	pgWriter "datax/internal/plugin/writer/postgresql"
 )
 
 // registerReaderPlugin 动态注册Reader插件
-func registerReaderPlugin(name string) {
+func registerReaderPlugin(name string) error {
 	switch name {
 	case "mysqlreader":
 		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
@@ -21,21 +23,32 @@ func registerReaderPlugin(name string) {
 			if err != nil {
 				return nil, err
 			}
-
-			var param mysqlreader.Parameter
-			if err := json.Unmarshal(paramBytes, &param); err != nil {
+			var p mysql.Parameter
+			if err := json.Unmarshal(paramBytes, &p); err != nil {
 				return nil, err
 			}
-
-			return mysqlreader.NewMySQLReader(&param), nil
+			return mysql.NewMySQLReader(&p), nil
+		})
+	case "postgresqlreader":
+		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
+			paramBytes, err := json.Marshal(parameter)
+			if err != nil {
+				return nil, err
+			}
+			var p pgReader.Parameter
+			if err := json.Unmarshal(paramBytes, &p); err != nil {
+				return nil, err
+			}
+			return pgReader.NewPostgreSQLReader(&p), nil
 		})
 	default:
-		log.Printf("未知的Reader类型: %s", name)
+		return fmt.Errorf("未知的Reader类型: %s", name)
 	}
+	return nil
 }
 
 // registerWriterPlugin 动态注册Writer插件
-func registerWriterPlugin(name string) {
+func registerWriterPlugin(name string) error {
 	switch name {
 	case "mysqlwriter":
 		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
@@ -43,75 +56,77 @@ func registerWriterPlugin(name string) {
 			if err != nil {
 				return nil, err
 			}
-
-			var param mysqlwriter.Parameter
-			if err := json.Unmarshal(paramBytes, &param); err != nil {
+			var p mysqlWriter.Parameter
+			if err := json.Unmarshal(paramBytes, &p); err != nil {
 				return nil, err
 			}
-
-			return mysqlwriter.NewMySQLWriter(&param), nil
+			return mysqlWriter.NewMySQLWriter(&p), nil
+		})
+	case "postgresqlwriter":
+		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
+			paramBytes, err := json.Marshal(parameter)
+			if err != nil {
+				return nil, err
+			}
+			var p pgWriter.Parameter
+			if err := json.Unmarshal(paramBytes, &p); err != nil {
+				return nil, err
+			}
+			return pgWriter.NewPostgreSQLWriter(&p), nil
 		})
 	default:
-		log.Printf("未知的Writer类型: %s", name)
+		return fmt.Errorf("未知的Writer类型: %s", name)
 	}
+	return nil
 }
 
 func main() {
-	// 定义命令行参数
-	var jobPath string
-	flag.StringVar(&jobPath, "job", "", "任务配置文件路径(json)")
+	// 解析命令行参数
+	var jobFile string
+	flag.StringVar(&jobFile, "job", "", "任务配置文件路径")
 	flag.Parse()
 
-	// 检查参数
-	if jobPath == "" {
-		log.Fatal("请指定任务配置文件路径，使用 -job 参数")
+	if jobFile == "" {
+		log.Fatal("请指定任务配置文件路径")
 	}
 
 	// 读取任务配置文件
-	jobData, err := ioutil.ReadFile(jobPath)
+	content, err := ioutil.ReadFile(jobFile)
 	if err != nil {
 		log.Fatalf("读取任务配置文件失败: %v", err)
 	}
 
+	// 解析任务配置
 	var jobConfig core.JobConfig
-	if err := json.Unmarshal(jobData, &jobConfig); err != nil {
-		log.Fatalf("解析任务配置文件失败: %v", err)
+	if err := json.Unmarshal(content, &jobConfig); err != nil {
+		log.Fatalf("解析任务配置失败: %v", err)
 	}
 
 	// 验证配置
-	if err := validateJobConfig(&jobConfig); err != nil {
-		log.Fatalf("配置验证失败: %v", err)
+	if len(jobConfig.Job.Content) == 0 {
+		log.Fatal("任务配置中没有content")
 	}
 
-	// 动态注册插件
-	content := jobConfig.Job.Content[0]
-	registerReaderPlugin(content.Reader.Name)
-	registerWriterPlugin(content.Writer.Name)
+	// 获取第一个任务内容
+	content0 := jobConfig.Job.Content[0]
 
-	// 创建并启动引擎
+	// 动态注册Reader插件
+	if err := registerReaderPlugin(content0.Reader.Name); err != nil {
+		log.Fatalf("注册Reader插件失败: %v", err)
+	}
+
+	// 动态注册Writer插件
+	if err := registerWriterPlugin(content0.Writer.Name); err != nil {
+		log.Fatalf("注册Writer插件失败: %v", err)
+	}
+
+	// 创建引擎
 	engine := core.NewDataXEngine(&jobConfig)
-	if err := engine.Init(); err != nil {
-		log.Fatalf("初始化引擎失败: %v", err)
-	}
 
+	// 开始数据同步
+	log.Println("开始数据同步任务...")
 	if err := engine.Start(); err != nil {
 		log.Fatalf("数据同步失败: %v", err)
 	}
-}
-
-// validateJobConfig 验证任务配置
-func validateJobConfig(config *core.JobConfig) error {
-	if len(config.Job.Content) == 0 {
-		return fmt.Errorf("任务配置中没有content")
-	}
-
-	content := config.Job.Content[0]
-	if content.Reader.Name == "" {
-		return fmt.Errorf("reader name 不能为空")
-	}
-	if content.Writer.Name == "" {
-		return fmt.Errorf("writer name 不能为空")
-	}
-
-	return nil
+	log.Println("数据同步完成!")
 }
