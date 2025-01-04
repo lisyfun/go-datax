@@ -1,0 +1,43 @@
+{
+  "job": {
+    "content": [
+      {
+        "reader": {
+          "name": "oraclereader",
+          "parameter": {
+            "username": "SYSTEM",
+            "password": "Welcome123",
+            "host": "127.0.0.1",
+            "port": 1521,
+            "service": "XEPDB1",
+            "table": "users",
+            "columns": ["id", "name", "age", "email"],
+            "where": "id > 0",
+            "batchSize": 20000
+          }
+        },
+        "writer": {
+          "name": "mysqlwriter",
+          "parameter": {
+            "username": "root",
+            "password": "123456",
+            "host": "localhost",
+            "port": 13306,
+            "database": "datax_target",
+            "table": "users",
+            "columns": ["id", "username", "email", "age"],
+            "batchSize": 10000,
+            "preSql": ["select count(*) from users", "truncate users"],
+            "postSql": ["select count(*) from users"],
+            "writeMode": "replace"
+          }
+        }
+      }
+    ],
+    "setting": {
+      "speed": {
+        "channel": 1
+      }
+    }
+  }
+}

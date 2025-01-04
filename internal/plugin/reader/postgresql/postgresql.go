@@ -104,24 +104,23 @@ func (r *PostgreSQLReader) GetTotalCount() (int64, error) {
 
 // Read 读取数据
 func (r *PostgreSQLReader) Read() ([]map[string]interface{}, error) {
-	// 获取主键或唯一索引字段
-	orderByColumns, err := r.GetPrimaryKeyColumns()
-	if err != nil {
-		log.Printf("获取主键字段失败: %v，将使用默认排序", err)
-		orderByColumns = []string{"id"}
-	}
-
 	// 构建查询SQL
 	var query string
 	if r.Parameter.SelectSQL != "" {
-		// 在子查询中添加排序
-		query = fmt.Sprintf("SELECT * FROM (%s) t ORDER BY %s LIMIT %d OFFSET %d",
+		// 当使用自定义 SQL 时，不添加排序
+		query = fmt.Sprintf("SELECT * FROM (%s) t LIMIT %d OFFSET %d",
 			r.Parameter.SelectSQL,
-			strings.Join(orderByColumns, ","),
 			r.Parameter.BatchSize,
 			r.offset,
 		)
 	} else {
+		// 获取主键或唯一索引字段
+		orderByColumns, err := r.GetPrimaryKeyColumns()
+		if err != nil {
+			log.Printf("获取主键字段失败: %v，将不使用排序", err)
+			orderByColumns = nil
+		}
+
 		var columns []string
 		if len(r.Parameter.Columns) > 0 {
 			for _, col := range r.Parameter.Columns {
@@ -136,15 +135,26 @@ func (r *PostgreSQLReader) Read() ([]map[string]interface{}, error) {
 			whereClause = "WHERE " + r.Parameter.Where
 		}
 
-		query = fmt.Sprintf("SELECT %s FROM %s.%s %s ORDER BY %s LIMIT %d OFFSET %d",
-			strings.Join(columns, ","),
-			r.Parameter.Schema,
-			r.Parameter.Table,
-			whereClause,
-			strings.Join(orderByColumns, ","),
-			r.Parameter.BatchSize,
-			r.offset,
-		)
+		if len(orderByColumns) > 0 {
+			query = fmt.Sprintf("SELECT %s FROM %s.%s %s ORDER BY %s LIMIT %d OFFSET %d",
+				strings.Join(columns, ","),
+				r.Parameter.Schema,
+				r.Parameter.Table,
+				whereClause,
+				strings.Join(orderByColumns, ","),
+				r.Parameter.BatchSize,
+				r.offset,
+			)
+		} else {
+			query = fmt.Sprintf("SELECT %s FROM %s.%s %s LIMIT %d OFFSET %d",
+				strings.Join(columns, ","),
+				r.Parameter.Schema,
+				r.Parameter.Table,
+				whereClause,
+				r.Parameter.BatchSize,
+				r.offset,
+			)
+		}
 	}
 
 	log.Printf("执行查询: %s", query)

@@ -4,13 +4,15 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
+	"os"
 
 	"datax/internal/core"
-	"datax/internal/plugin/reader/mysql"
+	mysqlReader "datax/internal/plugin/reader/mysql"
+	oracleReader "datax/internal/plugin/reader/oracle"
 	pgReader "datax/internal/plugin/reader/postgresql"
 	mysqlWriter "datax/internal/plugin/writer/mysql"
+	oracleWriter "datax/internal/plugin/writer/oracle"
 	pgWriter "datax/internal/plugin/writer/postgresql"
 )
 
@@ -23,11 +25,11 @@ func registerReaderPlugin(name string) error {
 			if err != nil {
 				return nil, err
 			}
-			var p mysql.Parameter
+			var p mysqlReader.Parameter
 			if err := json.Unmarshal(paramBytes, &p); err != nil {
 				return nil, err
 			}
-			return mysql.NewMySQLReader(&p), nil
+			return mysqlReader.NewMySQLReader(&p), nil
 		})
 	case "postgresqlreader":
 		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
@@ -40,6 +42,18 @@ func registerReaderPlugin(name string) error {
 				return nil, err
 			}
 			return pgReader.NewPostgreSQLReader(&p), nil
+		})
+	case "oraclereader":
+		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
+			paramBytes, err := json.Marshal(parameter)
+			if err != nil {
+				return nil, err
+			}
+			var p oracleReader.Parameter
+			if err := json.Unmarshal(paramBytes, &p); err != nil {
+				return nil, err
+			}
+			return oracleReader.NewOracleReader(&p), nil
 		})
 	default:
 		return fmt.Errorf("未知的Reader类型: %s", name)
@@ -74,6 +88,18 @@ func registerWriterPlugin(name string) error {
 			}
 			return pgWriter.NewPostgreSQLWriter(&p), nil
 		})
+	case "oraclewriter":
+		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
+			paramBytes, err := json.Marshal(parameter)
+			if err != nil {
+				return nil, err
+			}
+			var p oracleWriter.Parameter
+			if err := json.Unmarshal(paramBytes, &p); err != nil {
+				return nil, err
+			}
+			return oracleWriter.NewOracleWriter(&p), nil
+		})
 	default:
 		return fmt.Errorf("未知的Writer类型: %s", name)
 	}
@@ -91,7 +117,7 @@ func main() {
 	}
 
 	// 读取任务配置文件
-	content, err := ioutil.ReadFile(jobFile)
+	content, err := os.ReadFile(jobFile)
 	if err != nil {
 		log.Fatalf("读取任务配置文件失败: %v", err)
 	}

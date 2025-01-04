@@ -12,7 +12,7 @@
             "database": "datax_source",
             "table": "users",
             "columns": [],
-            "selectSql": "select * from users",
+            "selectSql": "select username, email, age, created_at, updated_at from users",
             "where": "1=1",
             "batchSize": 20000
           }
@@ -27,7 +27,6 @@
             "database": "datax_target",
             "table": "users",
             "columns": [
-              "id",
               "username",
               "email",
               "age",
