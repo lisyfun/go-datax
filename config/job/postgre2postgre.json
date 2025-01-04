@@ -12,7 +12,14 @@
             "database": "source_db",
             "schema": "public",
             "table": "users",
-            "columns": ["id", "username", "email","age","created_at","updated_at"],
+            "columns": [
+              "id",
+              "username",
+              "email",
+              "age",
+              "created_at",
+              "updated_at"
+            ],
             "where": "created_at > '2023-01-01'",
             "selectSql": "select * from users where id > 1000",
             "batchSize": 10000
@@ -28,14 +35,17 @@
             "database": "target_db",
             "schema": "public",
             "table": "users",
-            "columns": ["id", "username", "email","age","created_at","updated_at"],
+            "columns": [
+              "id",
+              "username",
+              "email",
+              "age",
+              "created_at",
+              "updated_at"
+            ],
             "batchSize": 10000,
-            "preSql": [
-              "select count(*) as total_count from users"
-            ],
-            "postSql": [
-              "select count(*) as total_count from users"
-            ],
+            "preSql": ["select count(*) as total_count from users"],
+            "postSql": ["select count(*) as total_count from users"],
             "writeMode": "replace"
           }
         }

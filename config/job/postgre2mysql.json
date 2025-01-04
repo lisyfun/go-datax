@@ -1,9 +1,9 @@
 {
   "job": {
-      "content": [
-          {
-              "reader": {
-                  "name": "postgresqlreader",
+    "content": [
+      {
+        "reader": {
+          "name": "postgresqlreader",
           "parameter": {
             "username": "postgres",
             "password": "123456",
@@ -12,44 +12,53 @@
             "database": "source_db",
             "schema": "public",
             "table": "users",
-            "columns": ["id", "username", "email","age","created_at","updated_at"],
+            "columns": [
+              "id",
+              "username",
+              "email",
+              "age",
+              "created_at",
+              "updated_at"
+            ],
             "where": "created_at > '2023-01-01'",
             "selectSql": "select * from users where id > 1000",
             "batchSize": 20000
           }
-              },
-              "writer": {
-                  "name": "mysqlwriter",
-                  "parameter": {
-                      "username": "root",
-                      "password": "123456",
-                      "host": "localhost",
-                      "port": 13306,
-                      "database": "datax_target",
-                      "table": "users",
-                      "columns": ["id", "username", "email","age","created_at","updated_at"],
-                      "batchSize": 10000,
-                      "preSql": [
-                          "select count(*) from users",
-                          "truncate users"
-                      ],
-                      "postSql": [
-                          "select count(*) from users"
-                      ],
-                      "writeMode": "replace"
-                  }
-              }
+        },
+        "writer": {
+          "name": "mysqlwriter",
+          "parameter": {
+            "username": "root",
+            "password": "123456",
+            "host": "localhost",
+            "port": 13306,
+            "database": "datax_target",
+            "table": "users",
+            "columns": [
+              "id",
+              "username",
+              "email",
+              "age",
+              "created_at",
+              "updated_at"
+            ],
+            "batchSize": 10000,
+            "preSql": ["select count(*) from users", "truncate users"],
+            "postSql": ["select count(*) from users"],
+            "writeMode": "replace"
           }
-      ],
-      "setting": {
-          "speed": {
-              "channel": 24,
-              "bytes": 52428800
-          },
-          "errorLimit": {
-              "record": 0,
-              "percentage": 0.02
-          }
+        }
       }
+    ],
+    "setting": {
+      "speed": {
+        "channel": 24,
+        "bytes": 52428800
+      },
+      "errorLimit": {
+        "record": 0,
+        "percentage": 0.02
+      }
+    }
   }
 }
