@@ -12,7 +12,7 @@
                       "database": "datax_source",
                       "table": "users",
                       "columns": [],
-                      "selectSql": "select id,username,email from users",
+                      "selectSql": "select * from users",
                       "where": "1=1",
                       "batchSize": 20000
                   }
@@ -26,7 +26,7 @@
                       "port": 13306,
                       "database": "datax_target",
                       "table": "users",
-                      "columns": ["id", "username", "email"],
+                      "columns": ["id", "username", "email","age","created_at","updated_at"],
                       "batchSize": 10000,
                       "preSql": [
                           "select count(*) from users",
