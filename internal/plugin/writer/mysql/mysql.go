@@ -97,13 +97,6 @@ func (w *MySQLWriter) PreProcess() error {
 	}
 
 	for _, sql := range w.Parameter.PreSQL {
-		log.Printf("执行预处理SQL: %s", sql)
-		result, err := w.DB.Exec(sql)
-		if err != nil {
-			return fmt.Errorf("执行预处理SQL失败: %v", err)
-		}
-
-		// 获取执行结果
 		if strings.Contains(strings.ToLower(sql), "select") {
 			rows, err := w.DB.Query(sql)
 			if err != nil {
@@ -116,14 +109,11 @@ func (w *MySQLWriter) PreProcess() error {
 				if err := rows.Scan(&count); err != nil {
 					return fmt.Errorf("读取预处理SQL结果失败: %v", err)
 				}
-				log.Printf("预处理SQL执行结果: %d", count)
 			}
 		} else {
-			affected, err := result.RowsAffected()
+			_, err := w.DB.Exec(sql)
 			if err != nil {
-				log.Printf("获取预处理SQL影响行数失败: %v", err)
-			} else {
-				log.Printf("预处理SQL执行结果: 影响 %d 行", affected)
+				return fmt.Errorf("执行预处理SQL失败: %v", err)
 			}
 		}
 	}
@@ -137,13 +127,6 @@ func (w *MySQLWriter) PostProcess() error {
 	}
 
 	for _, sql := range w.Parameter.PostSQL {
-		log.Printf("执行后处理SQL: %s", sql)
-		result, err := w.DB.Exec(sql)
-		if err != nil {
-			return fmt.Errorf("执行后处理SQL失败: %v", err)
-		}
-
-		// 获取执行结果
 		if strings.Contains(strings.ToLower(sql), "select") {
 			rows, err := w.DB.Query(sql)
 			if err != nil {
@@ -156,14 +139,11 @@ func (w *MySQLWriter) PostProcess() error {
 				if err := rows.Scan(&count); err != nil {
 					return fmt.Errorf("读取后处理SQL结果失败: %v", err)
 				}
-				log.Printf("后处理SQL执行结果: %d", count)
 			}
 		} else {
-			affected, err := result.RowsAffected()
+			_, err := w.DB.Exec(sql)
 			if err != nil {
-				log.Printf("获取后处理SQL影响行数失败: %v", err)
-			} else {
-				log.Printf("后处理SQL执行结果: 影响 %d 行", affected)
+				return fmt.Errorf("执行后处理SQL失败: %v", err)
 			}
 		}
 	}
@@ -389,14 +369,13 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 			case <-stopChan:
 				return
 			case workChan <- records[i:end]:
-				// 每秒最多输出一次进度日志
+				// 每10秒输出一次进度日志
 				now := time.Now()
-				if now.Sub(lastLogTime) >= time.Second {
+				if now.Sub(lastLogTime) >= 10*time.Second {
 					elapsed := now.Sub(startTime)
 					speed := float64(i+maxBatchSize) / elapsed.Seconds()
 					progress := float64(i+maxBatchSize) / float64(len(records)) * 100
-					log.Printf("进度: %.2f%%, 记录数: %d/%d, 速度: %.2f 条/秒",
-						progress, i+maxBatchSize, len(records), speed)
+					log.Printf("写入进度: %.2f%%, 速度: %.2f 条/秒", progress, speed)
 					lastLogTime = now
 				}
 			case <-timeout:
@@ -425,8 +404,7 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 
 	elapsed := time.Since(startTime)
 	speed := float64(len(records)) / elapsed.Seconds()
-	log.Printf("同步完成，总耗时: %.2f秒, 平均速度: %.2f 条/秒",
-		elapsed.Seconds(), speed)
+	log.Printf("写入完成，总耗时: %.2f秒, 平均速度: %.2f 条/秒", elapsed.Seconds(), speed)
 
 	if firstErr != nil {
 		return firstErr

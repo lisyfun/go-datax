@@ -57,13 +57,11 @@ func (r *OracleReader) Connect() error {
 	connStr := go_ora.BuildUrl(
 		r.Parameter.Host,
 		r.Parameter.Port,
-		service, // 使用转换后的服务名
+		service,
 		r.Parameter.Username,
 		r.Parameter.Password,
 		urlOptions,
 	)
-
-	log.Printf("尝试连接: %s", connStr)
 
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
@@ -83,7 +81,6 @@ func (r *OracleReader) Connect() error {
 	}
 
 	r.DB = db
-	log.Printf("成功连接到 Oracle 数据库")
 	return nil
 }
 
@@ -95,7 +92,6 @@ func (r *OracleReader) Read() ([][]interface{}, error) {
 
 	// 构建查询SQL
 	query := r.buildQuery()
-	log.Printf("执行查询: %s", query)
 
 	// 执行查询
 	rows, err := r.DB.Query(query)
@@ -138,11 +134,6 @@ func (r *OracleReader) Read() ([][]interface{}, error) {
 			default:
 				row[i] = v
 			}
-		}
-
-		// 打印前5条数据
-		if len(result) < 5 {
-			log.Printf("读取到数据: %+v", row)
 		}
 
 		result = append(result, row)

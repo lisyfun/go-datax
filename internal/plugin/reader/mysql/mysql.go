@@ -81,7 +81,6 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 
 	// 构建查询SQL
 	query := r.buildQuery()
-	log.Printf("执行查询: %s", query)
 
 	// 执行查询
 	rows, err := r.DB.Query(query)
@@ -126,11 +125,6 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 			}
 		}
 
-		// 打印前5条数据
-		if len(result) < 5 {
-			log.Printf("读取到数据: %+v", row)
-		}
-
 		result = append(result, row)
 	}
 
@@ -140,7 +134,6 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 
 	// 更新偏移量
 	r.offset += len(result)
-	log.Printf("读取了 %d 条记录，当前偏移量: %d", len(result), r.offset)
 
 	return result, nil
 }

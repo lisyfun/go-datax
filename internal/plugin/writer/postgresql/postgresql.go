@@ -3,7 +3,6 @@ package postgresql
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -89,9 +88,6 @@ func (w *PostgreSQLWriter) PreProcess() error {
 	}
 
 	for _, sql := range w.Parameter.PreSQL {
-		log.Printf("执行预处理SQL: %s", sql)
-
-		// 对于SELECT语句使用Query，其他语句使用Exec
 		if strings.Contains(strings.ToLower(sql), "select") {
 			rows, err := w.DB.Query(sql)
 			if err != nil {
@@ -99,13 +95,13 @@ func (w *PostgreSQLWriter) PreProcess() error {
 			}
 			defer rows.Close()
 
-			// 获取列信息
-			columns, err := rows.Columns()
-			if err != nil {
-				return fmt.Errorf("获取列信息失败: %v", err)
-			}
-
 			if rows.Next() {
+				// 获取列信息
+				columns, err := rows.Columns()
+				if err != nil {
+					return fmt.Errorf("获取列信息失败: %v", err)
+				}
+
 				// 创建一个切片来存储所有列的值
 				values := make([]interface{}, len(columns))
 				valuePtrs := make([]interface{}, len(columns))
@@ -116,28 +112,11 @@ func (w *PostgreSQLWriter) PreProcess() error {
 				if err := rows.Scan(valuePtrs...); err != nil {
 					return fmt.Errorf("读取预处理SQL结果失败: %v", err)
 				}
-
-				// 打印结果
-				result := make([]string, len(columns))
-				for i, val := range values {
-					if val == nil {
-						result[i] = "NULL"
-					} else {
-						result[i] = fmt.Sprintf("%v", val)
-					}
-				}
-				log.Printf("预处理SQL执行结果: %s", strings.Join(result, ", "))
 			}
 		} else {
-			result, err := w.DB.Exec(sql)
+			_, err := w.DB.Exec(sql)
 			if err != nil {
 				return fmt.Errorf("执行预处理SQL失败: %v", err)
-			}
-			affected, err := result.RowsAffected()
-			if err != nil {
-				log.Printf("获取预处理SQL影响行数失败: %v", err)
-			} else {
-				log.Printf("预处理SQL执行结果: 影响 %d 行", affected)
 			}
 		}
 	}
@@ -151,9 +130,6 @@ func (w *PostgreSQLWriter) PostProcess() error {
 	}
 
 	for _, sql := range w.Parameter.PostSQL {
-		log.Printf("执行后处理SQL: %s", sql)
-
-		// 对于SELECT语句使用Query，其他语句使用Exec
 		if strings.Contains(strings.ToLower(sql), "select") {
 			rows, err := w.DB.Query(sql)
 			if err != nil {
@@ -161,13 +137,13 @@ func (w *PostgreSQLWriter) PostProcess() error {
 			}
 			defer rows.Close()
 
-			// 获取列信息
-			columns, err := rows.Columns()
-			if err != nil {
-				return fmt.Errorf("获取列信息失败: %v", err)
-			}
-
 			if rows.Next() {
+				// 获取列信息
+				columns, err := rows.Columns()
+				if err != nil {
+					return fmt.Errorf("获取列信息失败: %v", err)
+				}
+
 				// 创建一个切片来存储所有列的值
 				values := make([]interface{}, len(columns))
 				valuePtrs := make([]interface{}, len(columns))
@@ -178,34 +154,11 @@ func (w *PostgreSQLWriter) PostProcess() error {
 				if err := rows.Scan(valuePtrs...); err != nil {
 					return fmt.Errorf("读取后处理SQL结果失败: %v", err)
 				}
-
-				// 打印结果
-				result := make([]string, len(columns))
-				for i, val := range values {
-					if val == nil {
-						result[i] = "NULL"
-					} else {
-						// 检查是否是时间间隔类型
-						if interval, ok := val.([]uint8); ok && strings.Contains(strings.ToLower(columns[i]), "time_span") {
-							// 将字节数组转换为字符串
-							result[i] = string(interval)
-						} else {
-							result[i] = fmt.Sprintf("%v", val)
-						}
-					}
-				}
-				log.Printf("后处理SQL执行结果: %s", strings.Join(result, ", "))
 			}
 		} else {
-			result, err := w.DB.Exec(sql)
+			_, err := w.DB.Exec(sql)
 			if err != nil {
 				return fmt.Errorf("执行后处理SQL失败: %v", err)
-			}
-			affected, err := result.RowsAffected()
-			if err != nil {
-				log.Printf("获取后处理SQL影响行数失败: %v", err)
-			} else {
-				log.Printf("后处理SQL执行结果: 影响 %d 行", affected)
 			}
 		}
 	}
