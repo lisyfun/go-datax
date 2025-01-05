@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	go_ora "github.com/sijms/go-ora/v2"
@@ -45,25 +46,24 @@ func NewOracleReader(parameter *Parameter) *OracleReader {
 
 // Connect 连接Oracle数据库
 func (r *OracleReader) Connect() error {
-	// 使用 go-ora.BuildUrl 构建连接字符串
+	// 尝试不同的连接选项
+	urlOptions := map[string]string{
+		"AUTH TYPE": "SYSDBA", // 添加SYSDBA认证
+	}
+
+	// 使用大写的服务名
+	service := strings.ToUpper(r.Parameter.Service)
+
 	connStr := go_ora.BuildUrl(
 		r.Parameter.Host,
 		r.Parameter.Port,
-		r.Parameter.Service,
+		service, // 使用转换后的服务名
 		r.Parameter.Username,
 		r.Parameter.Password,
-		nil,
+		urlOptions,
 	)
-	conn, err := go_ora.NewConnection(connStr, nil)
-	if err != nil {
-		return fmt.Errorf("连接Oracle失败: %v", err)
-	}
-	err = conn.Open()
-	if err != nil {
-		return fmt.Errorf("打开Oracle连接失败: %v", err)
-	}
 
-	log.Printf("Oracle连接字符串: %s, %v", connStr, conn)
+	log.Printf("尝试连接: %s", connStr)
 
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
@@ -75,21 +75,15 @@ func (r *OracleReader) Connect() error {
 	db.SetMaxOpenConns(10)
 	db.SetConnMaxLifetime(time.Hour)
 
-	// 测试连接
+	// 验证连接是否真正可用
 	err = db.Ping()
 	if err != nil {
-		return fmt.Errorf("ping Oracle失败: %v", err)
-	}
-
-	// 连接成功后，切换到指定的 PDB
-	if r.Parameter.Service != "" {
-		_, err = db.Exec(fmt.Sprintf("ALTER SESSION SET CONTAINER = %s", r.Parameter.Service))
-		if err != nil {
-			return fmt.Errorf("切换到 PDB %s 失败: %v", r.Parameter.Service, err)
-		}
+		db.Close()
+		return fmt.Errorf("验证连接失败: %v", err)
 	}
 
 	r.DB = db
+	log.Printf("成功连接到 Oracle 数据库")
 	return nil
 }
 
@@ -101,6 +95,7 @@ func (r *OracleReader) Read() ([]map[string]interface{}, error) {
 
 	// 构建查询SQL
 	query := r.buildQuery()
+	log.Printf("执行查询: %s", query)
 
 	// 执行查询
 	rows, err := r.DB.Query(query)
@@ -133,7 +128,7 @@ func (r *OracleReader) Read() ([]map[string]interface{}, error) {
 		}
 
 		row := make(map[string]interface{})
-		for i, col := range columns {
+		for i, col := range r.Parameter.Columns { // 使用原始列名作为map的key
 			val := values[i]
 			// 处理特殊类型
 			switch v := val.(type) {
@@ -146,6 +141,11 @@ func (r *OracleReader) Read() ([]map[string]interface{}, error) {
 			}
 		}
 		result = append(result, row)
+
+		// 打印前5条数据
+		if len(result) <= 5 {
+			log.Printf("读取到数据: %+v", row)
+		}
 	}
 
 	if err = rows.Err(); err != nil {
@@ -177,8 +177,14 @@ func (r *OracleReader) buildQuery() string {
 	// 否则根据配置构建SQL
 	columnsStr := "*"
 	if len(r.Parameter.Columns) > 0 {
-		columnsStr = fmt.Sprintf(`"%s"`, r.Parameter.Columns[0])
-		for _, col := range r.Parameter.Columns[1:] {
+		// 将列名转换为大写
+		upperColumns := make([]string, len(r.Parameter.Columns))
+		for i, col := range r.Parameter.Columns {
+			upperColumns[i] = strings.ToUpper(col)
+		}
+
+		columnsStr = fmt.Sprintf(`"%s"`, upperColumns[0])
+		for _, col := range upperColumns[1:] {
 			columnsStr += fmt.Sprintf(`,"%s"`, col)
 		}
 	}
@@ -191,11 +197,12 @@ func (r *OracleReader) buildQuery() string {
 
 	// Oracle 分页查询
 	return fmt.Sprintf(`
-		SELECT * FROM (
+		SELECT %s FROM (
 			SELECT a.*, ROWNUM rnum FROM (
 				%s
 			) a WHERE ROWNUM <= %d
 		) WHERE rnum > %d`,
+		columnsStr,
 		baseQuery,
 		r.offset+r.Parameter.BatchSize,
 		r.offset,

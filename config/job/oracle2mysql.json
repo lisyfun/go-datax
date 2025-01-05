@@ -5,13 +5,13 @@
         "reader": {
           "name": "oraclereader",
           "parameter": {
-            "username": "SYSTEM",
-            "password": "Welcome123",
+            "username": "sys",
+            "password": "123456",
             "host": "127.0.0.1",
             "port": 1521,
-            "service": "XEPDB1",
-            "table": "users",
-            "columns": ["id", "name", "age", "email"],
+            "service": "ORCL",
+            "table": "USERS",
+            "columns": ["name", "email", "age"],
             "where": "id > 0",
             "batchSize": 20000
           }
@@ -21,11 +21,11 @@
           "parameter": {
             "username": "root",
             "password": "123456",
-            "host": "localhost",
+            "host": "127.0.0.1",
             "port": 13306,
             "database": "datax_target",
             "table": "users",
-            "columns": ["id", "username", "email", "age"],
+            "columns": ["username", "email", "age"],
             "batchSize": 10000,
             "preSql": ["select count(*) from users", "truncate users"],
             "postSql": ["select count(*) from users"],
