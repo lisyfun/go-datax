@@ -11,7 +11,7 @@
             "port": 1521,
             "service": "ORCL",
             "table": "USERS",
-            "columns": ["name", "email", "age"],
+            "columns": ["NAME", "EMAIL", "AGE"],
             "where": "id > 0",
             "batchSize": 20000
           }
@@ -26,17 +26,22 @@
             "database": "datax_target",
             "table": "users",
             "columns": ["username", "email", "age"],
-            "batchSize": 10000,
-            "preSql": ["select count(*) from users", "truncate users"],
-            "postSql": ["select count(*) from users"],
-            "writeMode": "replace"
+            "preSql": [
+              "select count(*) from users",
+              "truncate users"
+            ],
+            "postSql": [
+              "select count(*) from users"
+            ],
+            "batchSize": 1000,
+            "writeMode": "insert"
           }
         }
       }
     ],
     "setting": {
       "speed": {
-        "channel": 1
+        "channel": 5
       }
     }
   }

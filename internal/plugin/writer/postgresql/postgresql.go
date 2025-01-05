@@ -213,154 +213,71 @@ func (w *PostgreSQLWriter) PostProcess() error {
 }
 
 // Write 写入数据
-func (w *PostgreSQLWriter) Write(records []map[string]interface{}) error {
+func (w *PostgreSQLWriter) Write(records [][]interface{}) error {
+	if w.DB == nil {
+		return fmt.Errorf("数据库连接未初始化")
+	}
+
 	if len(records) == 0 {
 		return nil
 	}
 
-	// 计算每批次最大记录数
-	maxBatchSize := w.Parameter.BatchSize
-	totalBatches := (len(records) + maxBatchSize - 1) / maxBatchSize
-	log.Printf("总记录数: %d, 每批次记录数: %d, 总批次数: %d", len(records), maxBatchSize, totalBatches)
-
-	// 创建错误通道和完成通道
-	errChan := make(chan error, totalBatches)
-	doneChan := make(chan bool, totalBatches)
-	stopChan := make(chan struct{}) // 用于通知所有工作协程停止
-	defer close(stopChan)
-
-	// 使用配置的channel数作为工作协程数
-	workerCount := 8                                               // 减少工作协程数，避免过多并发
-	workChan := make(chan []map[string]interface{}, workerCount*2) // 增加工作通道缓冲区
-
-	// 预先构建SQL模板
-	insertPrefix := w.buildInsertPrefix()
-
-	// 启动工作协程
-	for i := 0; i < workerCount; i++ {
-		go func(workerID int) {
-			for {
-				select {
-				case <-stopChan:
-					return
-				case batch, ok := <-workChan:
-					if !ok {
-						return
-					}
-
-					// 每个批次使用独立的事务
-					tx, err := w.DB.Begin()
-					if err != nil {
-						errChan <- fmt.Errorf("工作协程 %d 开始事务失败: %v", workerID, err)
-						continue
-					}
-
-					// 构建批量插入值
-					var values []string
-					valueArgs := make([]interface{}, 0, len(batch)*len(w.Parameter.Columns))
-					paramCount := 1
-
-					for _, record := range batch {
-						var placeholders []string
-						for _, col := range w.Parameter.Columns {
-							placeholders = append(placeholders, fmt.Sprintf("$%d", paramCount))
-							paramCount++
-							valueArgs = append(valueArgs, record[col])
-						}
-						values = append(values, fmt.Sprintf("(%s)", strings.Join(placeholders, ",")))
-					}
-
-					// 构建完整的SQL语句
-					finalSQL := insertPrefix + strings.Join(values, ",")
-					if w.Parameter.WriteMode == "replace" {
-						finalSQL += " ON CONFLICT (\"id\") DO UPDATE SET " + buildUpdateSet(w.Parameter.Columns)
-					}
-
-					// 执行批量写入
-					if _, err := tx.Exec(finalSQL, valueArgs...); err != nil {
-						tx.Rollback()
-						errChan <- fmt.Errorf("工作协程 %d 执行写入失败: %v", workerID, err)
-						continue
-					}
-
-					// 提交事务
-					if err := tx.Commit(); err != nil {
-						errChan <- fmt.Errorf("工作协程 %d 提交事务失败: %v", workerID, err)
-						continue
-					}
-
-					doneChan <- true
-				}
-			}
-		}(i)
+	// 构建插入SQL
+	var columns []string
+	for _, col := range w.Parameter.Columns {
+		columns = append(columns, fmt.Sprintf("%s", col))
 	}
 
-	// 分批发送数据到工作通道
-	startTime := time.Now()
-	lastLogTime := startTime
-	processedRecords := 0
+	// 构建占位符
+	var placeholders []string
+	for i := range w.Parameter.Columns {
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
+	}
 
-	// 使用超时控制
-	timeout := time.After(30 * time.Minute) // 设置30分钟超时
+	// 构建SQL语句
+	var action string
+	switch strings.ToLower(w.Parameter.WriteMode) {
+	case "update":
+		action = "UPDATE"
+	default:
+		action = "INSERT"
+	}
 
-	go func() {
-		defer close(workChan)
-		for i := 0; i < len(records); i += maxBatchSize {
-			end := i + maxBatchSize
-			if end > len(records) {
-				end = len(records)
-			}
+	sql := fmt.Sprintf("%s INTO %s.%s (%s) VALUES (%s)",
+		action,
+		w.Parameter.Schema,
+		w.Parameter.Table,
+		strings.Join(columns, ","),
+		strings.Join(placeholders, ","),
+	)
 
-			select {
-			case <-stopChan:
-				return
-			case workChan <- records[i:end]:
-				processedRecords = i + maxBatchSize
-				// 每秒最多输出一次进度日志
-				now := time.Now()
-				if now.Sub(lastLogTime) >= time.Second {
-					elapsed := now.Sub(startTime)
-					speed := float64(processedRecords) / elapsed.Seconds()
-					progress := float64(processedRecords) / float64(len(records)) * 100
-					log.Printf("进度: %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒",
-						progress, processedRecords, len(records), speed)
-					lastLogTime = now
-				}
-			case <-timeout:
-				log.Printf("数据同步超时")
-				return
-			}
-		}
-	}()
+	// 开始事务
+	tx, err := w.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("开始事务失败: %v", err)
+	}
+	defer tx.Rollback()
 
-	// 等待所有批次处理完成
-	var firstErr error
-	completedBatches := 0
-	errorCount := 0
+	// 准备语句
+	stmt, err := tx.Prepare(sql)
+	if err != nil {
+		return fmt.Errorf("准备语句失败: %v", err)
+	}
+	defer stmt.Close()
 
-	for completedBatches < totalBatches {
-		select {
-		case err := <-errChan:
-			if firstErr == nil {
-				firstErr = err
-			}
-			errorCount++
-			completedBatches++
-			log.Printf("发生错误: %v", err)
-		case <-doneChan:
-			completedBatches++
-		case <-timeout:
-			return fmt.Errorf("数据同步超时")
+	// 批量写入数据
+	for _, record := range records {
+		// 直接使用记录中的值
+		_, err = stmt.Exec(record...)
+		if err != nil {
+			return fmt.Errorf("执行写入失败: %v", err)
 		}
 	}
 
-	elapsed := time.Since(startTime)
-	speed := float64(len(records)) / elapsed.Seconds()
-	log.Printf("数据同步完成! 总耗时: %v, 处理记录数: %d, 错误记录数: %d, 平均速度: %.2f 条/秒",
-		elapsed, len(records), errorCount, speed)
-
-	if firstErr != nil {
-		return firstErr
+	// 提交事务
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("提交事务失败: %v", err)
 	}
 
 	return nil

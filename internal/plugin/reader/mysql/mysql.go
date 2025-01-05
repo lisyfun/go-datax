@@ -74,13 +74,14 @@ func (r *MySQLReader) Connect() error {
 }
 
 // Read 读取数据
-func (r *MySQLReader) Read() ([]map[string]interface{}, error) {
+func (r *MySQLReader) Read() ([][]interface{}, error) {
 	if r.DB == nil {
 		return nil, fmt.Errorf("数据库连接未初始化")
 	}
 
 	// 构建查询SQL
 	query := r.buildQuery()
+	log.Printf("执行查询: %s", query)
 
 	// 执行查询
 	rows, err := r.DB.Query(query)
@@ -96,7 +97,7 @@ func (r *MySQLReader) Read() ([]map[string]interface{}, error) {
 	}
 
 	// 准备数据容器
-	var result []map[string]interface{}
+	var result [][]interface{}
 	values := make([]interface{}, len(columns))
 	valuePtrs := make([]interface{}, len(columns))
 
@@ -112,19 +113,24 @@ func (r *MySQLReader) Read() ([]map[string]interface{}, error) {
 			continue
 		}
 
-		row := make(map[string]interface{})
-		for i, col := range columns {
-			val := values[i]
-			// 处理特殊类型
+		// 处理特殊类型
+		row := make([]interface{}, len(columns))
+		for i, val := range values {
 			switch v := val.(type) {
 			case []byte:
-				row[col] = string(v)
+				row[i] = string(v)
 			case time.Time:
-				row[col] = v.Format("2006-01-02 15:04:05")
+				row[i] = v.Format("2006-01-02 15:04:05")
 			default:
-				row[col] = v
+				row[i] = v
 			}
 		}
+
+		// 打印前5条数据
+		if len(result) < 5 {
+			log.Printf("读取到数据: %+v", row)
+		}
+
 		result = append(result, row)
 	}
 
@@ -134,6 +140,7 @@ func (r *MySQLReader) Read() ([]map[string]interface{}, error) {
 
 	// 更新偏移量
 	r.offset += len(result)
+	log.Printf("读取了 %d 条记录，当前偏移量: %d", len(result), r.offset)
 
 	return result, nil
 }

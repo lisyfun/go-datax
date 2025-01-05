@@ -88,7 +88,7 @@ func (r *OracleReader) Connect() error {
 }
 
 // Read 读取数据
-func (r *OracleReader) Read() ([]map[string]interface{}, error) {
+func (r *OracleReader) Read() ([][]interface{}, error) {
 	if r.DB == nil {
 		return nil, fmt.Errorf("数据库连接未初始化")
 	}
@@ -111,7 +111,7 @@ func (r *OracleReader) Read() ([]map[string]interface{}, error) {
 	}
 
 	// 准备数据容器
-	var result []map[string]interface{}
+	var result [][]interface{}
 	values := make([]interface{}, len(columns))
 	valuePtrs := make([]interface{}, len(columns))
 
@@ -127,25 +127,25 @@ func (r *OracleReader) Read() ([]map[string]interface{}, error) {
 			continue
 		}
 
-		row := make(map[string]interface{})
-		for i, col := range r.Parameter.Columns { // 使用原始列名作为map的key
-			val := values[i]
-			// 处理特殊类型
+		// 处理特殊类型
+		row := make([]interface{}, len(columns))
+		for i, val := range values {
 			switch v := val.(type) {
 			case []byte:
-				row[col] = string(v)
+				row[i] = string(v)
 			case time.Time:
-				row[col] = v.Format("2006-01-02 15:04:05")
+				row[i] = v.Format("2006-01-02 15:04:05")
 			default:
-				row[col] = v
+				row[i] = v
 			}
 		}
-		result = append(result, row)
 
 		// 打印前5条数据
-		if len(result) <= 5 {
+		if len(result) < 5 {
 			log.Printf("读取到数据: %+v", row)
 		}
+
+		result = append(result, row)
 	}
 
 	if err = rows.Err(); err != nil {
@@ -177,14 +177,8 @@ func (r *OracleReader) buildQuery() string {
 	// 否则根据配置构建SQL
 	columnsStr := "*"
 	if len(r.Parameter.Columns) > 0 {
-		// 将列名转换为大写
-		upperColumns := make([]string, len(r.Parameter.Columns))
-		for i, col := range r.Parameter.Columns {
-			upperColumns[i] = strings.ToUpper(col)
-		}
-
-		columnsStr = fmt.Sprintf(`"%s"`, upperColumns[0])
-		for _, col := range upperColumns[1:] {
+		columnsStr = fmt.Sprintf(`"%s"`, r.Parameter.Columns[0])
+		for _, col := range r.Parameter.Columns[1:] {
 			columnsStr += fmt.Sprintf(`,"%s"`, col)
 		}
 	}

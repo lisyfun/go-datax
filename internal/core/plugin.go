@@ -4,21 +4,21 @@ import (
 	"sync"
 )
 
-// Reader 数据读取接口
+// Reader 数据读取器接口
 type Reader interface {
 	Connect() error
-	GetTotalCount() (int64, error)
-	Read() ([]map[string]interface{}, error)
+	Read() ([][]interface{}, error)
 	Close() error
+	GetTotalCount() (int64, error)
 }
 
-// Writer 数据写入接口
+// Writer 数据写入器接口
 type Writer interface {
 	Connect() error
-	PreProcess() error
-	Write(records []map[string]interface{}) error
-	PostProcess() error
+	Write(records [][]interface{}) error
 	Close() error
+	PreProcess() error
+	PostProcess() error
 }
 
 // ReaderFactory Reader工厂函数类型

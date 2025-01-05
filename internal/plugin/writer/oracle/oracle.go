@@ -7,18 +7,21 @@ import (
 	"time"
 )
 
-// Parameter Oracle写入器参数结构体
+// Parameter Oracle写入器参数
 type Parameter struct {
-	Username  string   `json:"username"`
-	Password  string   `json:"password"`
-	Host      string   `json:"host"`
-	Port      int      `json:"port"`
-	Service   string   `json:"service"`
-	Table     string   `json:"table"`
-	Columns   []string `json:"columns"`
-	BatchSize int      `json:"batchSize"`
-	PreSQL    string   `json:"preSql"`
-	PostSQL   string   `json:"postSql"`
+	Username   string   `json:"username"`
+	Password   string   `json:"password"`
+	Host       string   `json:"host"`
+	Port       int      `json:"port"`
+	Service    string   `json:"service"`
+	Table      string   `json:"table"`
+	Schema     string   `json:"schema"`
+	Columns    []string `json:"columns"`
+	WriteMode  string   `json:"write_mode"`
+	BatchSize  int      `json:"batch_size"`
+	Concurrent int      `json:"concurrent"`
+	PreSQL     string   `json:"pre_sql"`
+	PostSQL    string   `json:"post_sql"`
 }
 
 // OracleWriter Oracle写入器结构体
@@ -99,57 +102,64 @@ func (w *OracleWriter) PostProcess() error {
 }
 
 // Write 写入数据
-func (w *OracleWriter) Write(records []map[string]interface{}) error {
+func (w *OracleWriter) Write(records [][]interface{}) error {
+	if w.DB == nil {
+		return fmt.Errorf("数据库连接未初始化")
+	}
+
 	if len(records) == 0 {
 		return nil
 	}
 
-	// 开启事务
-	tx, err := w.DB.Begin()
-	if err != nil {
-		return fmt.Errorf("开启事务失败: %v", err)
-	}
-
 	// 构建插入SQL
-	columns := w.Parameter.Columns
-	if len(columns) == 0 {
-		// 如果没有指定列，使用第一条记录的所有列
-		for col := range records[0] {
-			columns = append(columns, col)
-		}
+	var columns []string
+	for _, col := range w.Parameter.Columns {
+		columns = append(columns, fmt.Sprintf("%s", col))
 	}
 
-	placeholders := make([]string, len(columns))
-	for i := range placeholders {
-		placeholders[i] = fmt.Sprintf(":%d", i+1)
+	// 构建占位符
+	var placeholders []string
+	for i := range w.Parameter.Columns {
+		placeholders = append(placeholders, fmt.Sprintf(":%d", i+1))
 	}
 
-	query := fmt.Sprintf(
-		`INSERT INTO "%s" ("%s") VALUES (%s)`,
+	// 构建SQL语句
+	var action string
+	switch strings.ToLower(w.Parameter.WriteMode) {
+	case "update":
+		action = "UPDATE"
+	default:
+		action = "INSERT"
+	}
+
+	sql := fmt.Sprintf("%s INTO %s.%s (%s) VALUES (%s)",
+		action,
+		w.Parameter.Schema,
 		w.Parameter.Table,
-		strings.Join(columns, `","`),
+		strings.Join(columns, ","),
 		strings.Join(placeholders, ","),
 	)
 
-	// 准备语句
-	stmt, err := tx.Prepare(query)
+	// 开始事务
+	tx, err := w.DB.Begin()
 	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("准备SQL语句失败: %v", err)
+		return fmt.Errorf("开始事务失败: %v", err)
+	}
+	defer tx.Rollback()
+
+	// 准备语句
+	stmt, err := tx.Prepare(sql)
+	if err != nil {
+		return fmt.Errorf("准备语句失败: %v", err)
 	}
 	defer stmt.Close()
 
-	// 批量插入数据
+	// 批量写入数据
 	for _, record := range records {
-		values := make([]interface{}, len(columns))
-		for i, col := range columns {
-			values[i] = record[col]
-		}
-
-		_, err = stmt.Exec(values...)
+		// 直接使用记录中的值
+		_, err = stmt.Exec(record...)
 		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("插入数据失败: %v", err)
+			return fmt.Errorf("执行写入失败: %v", err)
 		}
 	}
 
@@ -162,10 +172,81 @@ func (w *OracleWriter) Write(records []map[string]interface{}) error {
 	return nil
 }
 
-// Close 关闭数据库连接
+// Init 初始化Oracle写入器
+func (w *OracleWriter) Init() error {
+	if w.Parameter == nil {
+		return fmt.Errorf("参数不能为空")
+	}
+
+	// 验证必填参数
+	if w.Parameter.Username == "" {
+		return fmt.Errorf("用户名不能为空")
+	}
+	if w.Parameter.Password == "" {
+		return fmt.Errorf("密码不能为空")
+	}
+	if w.Parameter.Host == "" {
+		return fmt.Errorf("主机不能为空")
+	}
+	if w.Parameter.Port == 0 {
+		return fmt.Errorf("端口不能为空")
+	}
+	if w.Parameter.Service == "" {
+		return fmt.Errorf("服务名不能为空")
+	}
+	if w.Parameter.Table == "" {
+		return fmt.Errorf("表名不能为空")
+	}
+
+	// 设置默认值
+	if w.Parameter.BatchSize == 0 {
+		w.Parameter.BatchSize = 1000
+	}
+	if w.Parameter.Concurrent == 0 {
+		w.Parameter.Concurrent = 1
+	}
+
+	// 构建连接字符串
+	dsn := fmt.Sprintf(
+		"oracle://%s:%s@%s:%d/%s",
+		w.Parameter.Username,
+		w.Parameter.Password,
+		w.Parameter.Host,
+		w.Parameter.Port,
+		w.Parameter.Service,
+	)
+
+	// 连接数据库
+	db, err := sql.Open("oracle", dsn)
+	if err != nil {
+		return fmt.Errorf("连接数据库失败: %v", err)
+	}
+	w.DB = db
+
+	// 执行PreSQL
+	if w.Parameter.PreSQL != "" {
+		if _, err := w.DB.Exec(w.Parameter.PreSQL); err != nil {
+			return fmt.Errorf("执行PreSQL失败: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// Close 关闭Oracle写入器
 func (w *OracleWriter) Close() error {
 	if w.DB != nil {
-		return w.DB.Close()
+		// 执行PostSQL
+		if w.Parameter.PostSQL != "" {
+			if _, err := w.DB.Exec(w.Parameter.PostSQL); err != nil {
+				return fmt.Errorf("执行PostSQL失败: %v", err)
+			}
+		}
+
+		// 关闭数据库连接
+		if err := w.DB.Close(); err != nil {
+			return fmt.Errorf("关闭数据库连接失败: %v", err)
+		}
 	}
 	return nil
 }
