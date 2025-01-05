@@ -11,7 +11,8 @@
             "port": 1521,
             "service": "ORCL",
             "table": "USERS",
-            "columns": ["NAME", "EMAIL", "AGE"],
+            "columns": [],
+            "selectSql": "select ID, NAME, EMAIL, AGE from USERS",
             "where": "id > 0",
             "batchSize": 20000
           }
@@ -25,7 +26,7 @@
             "port": 13306,
             "database": "datax_target",
             "table": "users",
-            "columns": ["username", "email", "age"],
+            "columns": ["id", "username", "email", "age"],
             "preSql": [
               "select count(*) from users",
               "truncate users"

@@ -13,14 +13,9 @@
             "schema": "public",
             "table": "users",
             "columns": [
-              "username",
-              "email",
-              "age",
-              "created_at",
-              "updated_at"
             ],
             "where": "created_at > '2023-01-01'",
-            "selectSql": "select username, email, age, created_at, updated_at from users",
+            "selectSql": "select id, username, email, age from users",
             "batchSize": 20000
           }
         },
@@ -34,11 +29,10 @@
             "database": "datax_target",
             "table": "users",
             "columns": [
+              "id",
               "username",
               "email",
-              "age",
-              "created_at",
-              "updated_at"
+              "age"
             ],
             "batchSize": 10000,
             "preSql": ["select count(*) from users", "truncate users"],
