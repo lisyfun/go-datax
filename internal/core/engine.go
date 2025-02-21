@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -27,6 +28,16 @@ func (e *DataXEngine) Start() error {
 	}
 
 	content := e.jobConfig.Job.Content[0]
+
+	// 打印JSON格式的配置信息
+	readerJSON, _ := json.MarshalIndent(content.Reader, "", "  ")
+	writerJSON, _ := json.MarshalIndent(content.Writer, "", "  ")
+	settingJSON, _ := json.MarshalIndent(e.jobConfig.Job.Setting, "", "  ")
+
+	log.Printf("开始数据同步任务:")
+	log.Printf("Reader配置:\n%s", readerJSON)
+	log.Printf("Writer配置:\n%s", writerJSON)
+	log.Printf("任务设置:\n%s", settingJSON)
 
 	// 创建Reader
 	factoryMutex.RLock()
@@ -74,6 +85,19 @@ func (e *DataXEngine) Start() error {
 		return fmt.Errorf("获取总记录数失败: %v", err)
 	}
 	log.Printf("总记录数: %d", totalCount)
+
+	// 根据数据量动态调整批次大小
+	batchSize := calculateBatchSize(totalCount)
+
+	// 更新 Reader 和 Writer 的批次大小
+	if rp, ok := content.Reader.Parameter.(map[string]interface{}); ok {
+		rp["batchSize"] = batchSize
+	}
+	if wp, ok := content.Writer.Parameter.(map[string]interface{}); ok {
+		wp["batchSize"] = batchSize
+	}
+
+	log.Printf("根据数据量(%d)自动调整批次大小为: %d", totalCount, batchSize)
 
 	// 执行预处理
 	if err := e.writer.PreProcess(); err != nil {
@@ -129,4 +153,20 @@ func (e *DataXEngine) Start() error {
 		elapsed, processedCount, errorCount, speed)
 
 	return nil
+}
+
+// calculateBatchSize 根据数据总量计算合适的批次大小
+func calculateBatchSize(totalCount int64) int {
+	switch {
+	case totalCount <= 10000:
+		return 1000 // 小数据量使用较小批次
+	case totalCount <= 100000:
+		return 5000 // 中等数据量
+	case totalCount <= 1000000:
+		return 10000 // 较大数据量
+	case totalCount <= 10000000:
+		return 20000 // 大数据量
+	default:
+		return 50000 // 超大数据量
+	}
 }

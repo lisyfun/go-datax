@@ -13,7 +13,7 @@
             "table": "users",
             "columns": [],
             "selectSql": "select username, email, age, created_at, updated_at from users",
-            "where": "1=1",
+            "where": "",
             "batchSize": 20000
           }
         },
