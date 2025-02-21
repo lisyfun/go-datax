@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	_ "github.com/go-sql-driver/mysql"
 )
 
 // Parameter MySQL写入器参数结构体
