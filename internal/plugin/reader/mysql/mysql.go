@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -59,9 +60,9 @@ func (r *MySQLReader) Connect() error {
 	}
 
 	// 设置连接池配置
-	db.SetMaxIdleConns(5)
-	db.SetMaxOpenConns(10)
-	db.SetConnMaxLifetime(time.Hour)
+	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(20)
+	db.SetConnMaxIdleTime(30 * time.Minute)
 
 	// 测试连接
 	err = db.Ping()
@@ -82,8 +83,11 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 	// 构建查询SQL
 	query := r.buildQuery()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// 执行查询
-	rows, err := r.DB.Query(query)
+	rows, err := r.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("执行查询失败: %v", err)
 	}
@@ -120,6 +124,20 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 				row[i] = string(v)
 			case time.Time:
 				row[i] = v.Format("2006-01-02 15:04:05")
+			case sql.NullString:
+				row[i] = v.String
+			case sql.NullInt64:
+				row[i] = v.Int64
+			case sql.NullFloat64:
+				row[i] = v.Float64
+			case sql.NullBool:
+				row[i] = v.Bool
+			case sql.NullTime:
+				if v.Valid {
+					row[i] = v.Time.Format("2006-01-02 15:04:05")
+				} else {
+					row[i] = nil
+				}
 			default:
 				row[i] = v
 			}

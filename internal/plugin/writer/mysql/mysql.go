@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -293,7 +294,16 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 						// 提交最后的事务
 						if batchCount > 0 {
 							if err := tx.Commit(); err != nil {
-								errChan <- fmt.Errorf("工作协程 %d 提交最终事务失败: %v", workerID, err)
+								// 应该区分是否需要重试的错误
+								if mysqlErr, ok := err.(*mysql.MySQLError); ok {
+									switch mysqlErr.Number {
+									case 1213: // 死锁
+										errChan <- fmt.Errorf("发生死锁，需要重试: %v", err)
+									case 1205: // 锁等待超时
+										errChan <- fmt.Errorf("锁等待超时，需要重试: %v", err)
+									}
+								}
+								return
 							}
 						}
 						return
@@ -331,7 +341,15 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 					// 每处理50个批次或累计100万条记录提交一次事务
 					if batchCount >= 50 || totalRecords >= 1000000 {
 						if err := tx.Commit(); err != nil {
-							errChan <- fmt.Errorf("工作协程 %d 提交事务失败: %v", workerID, err)
+							// 应该区分是否需要重试的错误
+							if mysqlErr, ok := err.(*mysql.MySQLError); ok {
+								switch mysqlErr.Number {
+								case 1213: // 死锁
+									errChan <- fmt.Errorf("发生死锁，需要重试: %v", err)
+								case 1205: // 锁等待超时
+									errChan <- fmt.Errorf("锁等待超时，需要重试: %v", err)
+								}
+							}
 							return
 						}
 						// 开启新事务
@@ -415,22 +433,30 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 
 // Close 关闭数据库连接
 func (w *MySQLWriter) Close() error {
+	var errs []error
+
 	if w.tx != nil {
-		w.RollbackTransaction()
+		if err := w.RollbackTransaction(); err != nil {
+			errs = append(errs, fmt.Errorf("回滚事务失败: %v", err))
+		}
 	}
 
-	// 恢复会话变量
 	if w.DB != nil {
-		_, err := w.DB.Exec(`
+		if _, err := w.DB.Exec(`
 			SET SESSION
 			unique_checks = 1,
 			foreign_key_checks = 1
-		`)
-		if err != nil {
-			log.Printf("恢复会话变量失败: %v", err)
+		`); err != nil {
+			errs = append(errs, fmt.Errorf("恢复会话变量失败: %v", err))
 		}
 
-		return w.DB.Close()
+		if err := w.DB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("关闭数据库连接失败: %v", err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("关闭过程中发生多个错误: %v", errs)
 	}
 	return nil
 }
