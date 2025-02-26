@@ -17,6 +17,13 @@ import (
 	pgWriter "datax/internal/plugin/writer/postgresql"
 )
 
+// 版本信息，在编译时通过 -ldflags 注入
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	CommitID  = "unknown"
+)
+
 // registerReaderPlugin 动态注册Reader插件
 func registerReaderPlugin(name string) error {
 	switch name {
@@ -140,12 +147,25 @@ func registerWriterPlugin(name string) error {
 func main() {
 	// 解析命令行参数
 	var jobFile string
+	var showVersion bool
 	flag.StringVar(&jobFile, "job", "", "任务配置文件路径")
+	flag.BoolVar(&showVersion, "version", false, "显示版本信息")
 	flag.Parse()
+
+	// 显示版本信息
+	if showVersion {
+		fmt.Printf("DataX 版本: %s\n", Version)
+		fmt.Printf("构建时间: %s\n", BuildTime)
+		fmt.Printf("提交ID: %s\n", CommitID)
+		return
+	}
 
 	if jobFile == "" {
 		log.Fatal("请指定任务配置文件路径")
 	}
+
+	// 输出版本信息
+	log.Printf("DataX 版本: %s, 构建时间: %s, 提交ID: %s", Version, BuildTime, CommitID)
 
 	// 读取任务配置文件
 	content, err := os.ReadFile(jobFile)
