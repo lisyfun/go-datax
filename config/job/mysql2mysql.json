@@ -33,7 +33,7 @@
               "created_at",
               "updated_at"
             ],
-            "batchSize": 10000,
+            "batchSize": 20000,
             "preSql": ["select count(*) from users", "truncate users"],
             "postSql": ["select count(*) from users"],
             "writeMode": "replace"

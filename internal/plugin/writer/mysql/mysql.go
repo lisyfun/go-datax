@@ -93,13 +93,20 @@ func (w *MySQLWriter) Connect() error {
 // PreProcess 预处理：执行写入前的SQL语句
 func (w *MySQLWriter) PreProcess() error {
 	if len(w.Parameter.PreSQL) == 0 {
+		log.Println("没有配置预处理SQL语句")
 		return nil
 	}
 
-	for _, sql := range w.Parameter.PreSQL {
+	log.Printf("开始执行预处理SQL语句，共 %d 条", len(w.Parameter.PreSQL))
+
+	for i, sql := range w.Parameter.PreSQL {
+		log.Printf("执行预处理SQL[%d]: %s", i+1, sql)
+
 		if strings.Contains(strings.ToLower(sql), "select") {
+			startTime := time.Now()
 			rows, err := w.DB.Query(sql)
 			if err != nil {
+				log.Printf("查询预处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("查询预处理SQL结果失败: %v", err)
 			}
 			defer rows.Close()
@@ -107,29 +114,47 @@ func (w *MySQLWriter) PreProcess() error {
 			if rows.Next() {
 				var count int
 				if err := rows.Scan(&count); err != nil {
+					log.Printf("读取预处理SQL[%d]结果失败: %v", i+1, err)
 					return fmt.Errorf("读取预处理SQL结果失败: %v", err)
 				}
+				log.Printf("预处理SQL[%d]查询结果: %d, 耗时: %v", i+1, count, time.Since(startTime))
+			} else {
+				log.Printf("预处理SQL[%d]查询无结果, 耗时: %v", i+1, time.Since(startTime))
 			}
 		} else {
-			_, err := w.DB.Exec(sql)
+			startTime := time.Now()
+			result, err := w.DB.Exec(sql)
 			if err != nil {
+				log.Printf("执行预处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("执行预处理SQL失败: %v", err)
 			}
+
+			rowsAffected, _ := result.RowsAffected()
+			log.Printf("预处理SQL[%d]执行成功, 影响行数: %d, 耗时: %v", i+1, rowsAffected, time.Since(startTime))
 		}
 	}
+
+	log.Println("预处理SQL语句执行完成")
 	return nil
 }
 
 // PostProcess 后处理：执行写入后的SQL语句
 func (w *MySQLWriter) PostProcess() error {
 	if len(w.Parameter.PostSQL) == 0 {
+		log.Println("没有配置后处理SQL语句")
 		return nil
 	}
 
-	for _, sql := range w.Parameter.PostSQL {
+	log.Printf("开始执行后处理SQL语句，共 %d 条", len(w.Parameter.PostSQL))
+
+	for i, sql := range w.Parameter.PostSQL {
+		log.Printf("执行后处理SQL[%d]: %s", i+1, sql)
+
 		if strings.Contains(strings.ToLower(sql), "select") {
+			startTime := time.Now()
 			rows, err := w.DB.Query(sql)
 			if err != nil {
+				log.Printf("查询后处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("查询后处理SQL结果失败: %v", err)
 			}
 			defer rows.Close()
@@ -137,16 +162,27 @@ func (w *MySQLWriter) PostProcess() error {
 			if rows.Next() {
 				var count int
 				if err := rows.Scan(&count); err != nil {
+					log.Printf("读取后处理SQL[%d]结果失败: %v", i+1, err)
 					return fmt.Errorf("读取后处理SQL结果失败: %v", err)
 				}
+				log.Printf("后处理SQL[%d]查询结果: %d, 耗时: %v", i+1, count, time.Since(startTime))
+			} else {
+				log.Printf("后处理SQL[%d]查询无结果, 耗时: %v", i+1, time.Since(startTime))
 			}
 		} else {
-			_, err := w.DB.Exec(sql)
+			startTime := time.Now()
+			result, err := w.DB.Exec(sql)
 			if err != nil {
+				log.Printf("执行后处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("执行后处理SQL失败: %v", err)
 			}
+
+			rowsAffected, _ := result.RowsAffected()
+			log.Printf("后处理SQL[%d]执行成功, 影响行数: %d, 耗时: %v", i+1, rowsAffected, time.Since(startTime))
 		}
 	}
+
+	log.Println("后处理SQL语句执行完成")
 	return nil
 }
 

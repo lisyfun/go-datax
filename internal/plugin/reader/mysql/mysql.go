@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -83,6 +84,11 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 	// 构建查询SQL
 	query := r.buildQuery()
 
+	// 记录首次查询的SQL语句
+	if r.offset == 0 {
+		log.Printf("执行数据读取的SQL: %s", query)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -159,9 +165,24 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 // buildQuery 构建SQL查询语句
 func (r *MySQLReader) buildQuery() string {
 	if r.Parameter.SelectSQL != "" {
-		// 如果配置了完整的SQL语句，直接使用
+		baseSQL := r.Parameter.SelectSQL
+
+		// 检查是否同时存在 where 条件
+		if r.Parameter.Where != "" {
+			// 检查 selectSql 中是否已经包含 WHERE 子句
+			whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
+			if whereIndex == -1 {
+				// 如果不包含 WHERE 子句，添加 where 条件
+				baseSQL += " WHERE " + r.Parameter.Where
+			} else {
+				// 如果已包含 WHERE 子句，使用 AND 连接条件
+				baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
+			}
+		}
+
+		// 添加分页
 		return fmt.Sprintf("%s LIMIT %d OFFSET %d",
-			r.Parameter.SelectSQL,
+			baseSQL,
 			r.Parameter.BatchSize,
 			r.offset,
 		)
@@ -203,7 +224,47 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 	}
 
 	var query string
-	if r.Parameter.Where != "" {
+	if r.Parameter.SelectSQL != "" {
+		// 如果配置了完整的SQL语句，需要从中提取条件
+		baseSQL := r.Parameter.SelectSQL
+
+		// 提取FROM子句
+		fromIndex := strings.Index(strings.ToUpper(baseSQL), " FROM ")
+		if fromIndex == -1 {
+			return 0, fmt.Errorf("无法从selectSql中解析FROM子句")
+		}
+
+		// 提取表名和条件
+		fromClause := baseSQL[fromIndex:]
+
+		// 检查是否同时存在 where 条件
+		if r.Parameter.Where != "" {
+			// 检查 fromClause 中是否已经包含 WHERE 子句
+			whereIndex := strings.Index(strings.ToUpper(fromClause), " WHERE ")
+			if whereIndex == -1 {
+				// 如果不包含 WHERE 子句，添加 where 条件
+				fromClause += " WHERE " + r.Parameter.Where
+			} else {
+				// 如果已包含 WHERE 子句，使用 AND 连接条件
+				fromClause = fromClause[:whereIndex+7] + "(" + fromClause[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
+			}
+		}
+
+		// 移除可能存在的ORDER BY, LIMIT等子句
+		orderByIndex := strings.Index(strings.ToUpper(fromClause), " ORDER BY ")
+		limitIndex := strings.Index(strings.ToUpper(fromClause), " LIMIT ")
+		groupByIndex := strings.Index(strings.ToUpper(fromClause), " GROUP BY ")
+
+		if orderByIndex != -1 {
+			fromClause = fromClause[:orderByIndex]
+		} else if limitIndex != -1 {
+			fromClause = fromClause[:limitIndex]
+		} else if groupByIndex != -1 {
+			fromClause = fromClause[:groupByIndex]
+		}
+
+		query = "SELECT COUNT(*)" + fromClause
+	} else if r.Parameter.Where != "" {
 		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE %s",
 			r.Parameter.Table,
 			r.Parameter.Where,
@@ -211,6 +272,8 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 	} else {
 		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s`", r.Parameter.Table)
 	}
+
+	log.Printf("计算总记录数的SQL: %s", query)
 
 	var count int64
 	err := r.DB.QueryRow(query).Scan(&count)
