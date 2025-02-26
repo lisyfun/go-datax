@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -30,14 +31,27 @@ func (e *DataXEngine) Start() error {
 	content := e.jobConfig.Job.Content[0]
 
 	// 打印JSON格式的配置信息
-	readerJSON, _ := json.MarshalIndent(content.Reader, "", "  ")
-	writerJSON, _ := json.MarshalIndent(content.Writer, "", "  ")
-	settingJSON, _ := json.MarshalIndent(e.jobConfig.Job.Setting, "", "  ")
+	var readerBuf, writerBuf, settingBuf bytes.Buffer
+
+	readerEncoder := json.NewEncoder(&readerBuf)
+	readerEncoder.SetIndent("", "  ")
+	readerEncoder.SetEscapeHTML(false)
+	readerEncoder.Encode(content.Reader)
+
+	writerEncoder := json.NewEncoder(&writerBuf)
+	writerEncoder.SetIndent("", "  ")
+	writerEncoder.SetEscapeHTML(false)
+	writerEncoder.Encode(content.Writer)
+
+	settingEncoder := json.NewEncoder(&settingBuf)
+	settingEncoder.SetIndent("", "  ")
+	settingEncoder.SetEscapeHTML(false)
+	settingEncoder.Encode(e.jobConfig.Job.Setting)
 
 	log.Printf("开始数据同步任务:")
-	log.Printf("Reader配置:\n%s", readerJSON)
-	log.Printf("Writer配置:\n%s", writerJSON)
-	log.Printf("任务设置:\n%s", settingJSON)
+	log.Printf("Reader配置:\n%s", readerBuf.String())
+	log.Printf("Writer配置:\n%s", writerBuf.String())
+	log.Printf("任务设置:\n%s", settingBuf.String())
 
 	// 创建Reader
 	factoryMutex.RLock()
