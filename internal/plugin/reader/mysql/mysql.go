@@ -80,13 +80,12 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 		return nil, fmt.Errorf("数据库连接未初始化")
 	}
 
-	// 构建查询SQL
 	query := r.buildQuery()
+	log.Printf("执行查询: %s [offset=%d]", query, r.offset)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 执行查询
 	rows, err := r.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("执行查询失败: %v", err)
@@ -144,47 +143,51 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 		}
 
 		result = append(result, row)
+
+		// 打印当前批次信息
+		log.Printf("当前offset: %d, 本批次读取记录数: %d", r.offset, len(result))
+
+		// 只有在实际读取到数据时才更新 offset
+		if len(result) > 0 {
+			r.offset += len(result)
+		}
 	}
 
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("读取数据过程中发生错误: %v", err)
 	}
 
-	// 更新偏移量
-	r.offset += len(result)
+	recordCount := len(result)
+	log.Printf("查询结果: offset=%d, 记录数=%d", r.offset, recordCount)
 
 	return result, nil
 }
 
 // buildQuery 构建SQL查询语句
 func (r *MySQLReader) buildQuery() string {
+	var query string
 	if r.Parameter.SelectSQL != "" {
-		// 如果配置了完整的SQL语句，直接使用
-		return fmt.Sprintf("%s LIMIT %d OFFSET %d",
-			r.Parameter.SelectSQL,
-			r.Parameter.BatchSize,
-			r.offset,
-		)
-	}
-
-	// 否则根据配置构建SQL
-	columnsStr := "*"
-	if len(r.Parameter.Columns) > 0 {
-		columnsStr = fmt.Sprintf("`%s`", r.Parameter.Columns[0])
-		for _, col := range r.Parameter.Columns[1:] {
-			columnsStr += fmt.Sprintf(",`%s`", col)
+		query = r.Parameter.SelectSQL
+	} else {
+		// 构建基础查询
+		columnsStr := "*"
+		if len(r.Parameter.Columns) > 0 {
+			columnsStr = fmt.Sprintf("`%s`", r.Parameter.Columns[0])
+			for _, col := range r.Parameter.Columns[1:] {
+				columnsStr += fmt.Sprintf(",`%s`", col)
+			}
 		}
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM `%s`", columnsStr, r.Parameter.Table)
-
-	if r.Parameter.Where != "" {
-		query += " WHERE " + r.Parameter.Where
+		query = fmt.Sprintf("SELECT %s FROM `%s`", columnsStr, r.Parameter.Table)
+		if r.Parameter.Where != "" {
+			query += " WHERE " + r.Parameter.Where
+		}
 	}
 
 	// 添加分页
 	query += fmt.Sprintf(" LIMIT %d OFFSET %d", r.Parameter.BatchSize, r.offset)
 
+	// 打印完整SQL
+	log.Printf("执行SQL: %s", query)
 	return query
 }
 
