@@ -228,6 +228,21 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 		// 如果配置了完整的SQL语句，需要从中提取条件
 		baseSQL := r.Parameter.SelectSQL
 
+		// 预处理SQL语句：移除换行符和多余的空格
+		baseSQL = strings.TrimSpace(baseSQL)
+		baseSQL = strings.ReplaceAll(baseSQL, "\n", " ")
+		baseSQL = strings.ReplaceAll(baseSQL, "\r", " ")
+
+		// 处理 REPLACE INTO 或 INSERT INTO 语句
+		if strings.HasPrefix(strings.ToUpper(baseSQL), "REPLACE INTO") ||
+			strings.HasPrefix(strings.ToUpper(baseSQL), "INSERT INTO") {
+			selectIndex := strings.Index(strings.ToUpper(baseSQL), "SELECT")
+			if selectIndex == -1 {
+				return 0, fmt.Errorf("无法从SQL语句中找到SELECT子句")
+			}
+			baseSQL = baseSQL[selectIndex:]
+		}
+
 		// 提取FROM子句
 		fromIndex := strings.Index(strings.ToUpper(baseSQL), " FROM ")
 		if fromIndex == -1 {
