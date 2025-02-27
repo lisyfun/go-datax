@@ -225,11 +225,8 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 
 	var query string
 	if r.Parameter.SelectSQL != "" {
-		// 如果配置了完整的SQL语句，需要从中提取条件
-		baseSQL := r.Parameter.SelectSQL
-
 		// 预处理SQL语句：移除换行符和多余的空格
-		baseSQL = strings.TrimSpace(baseSQL)
+		baseSQL := strings.TrimSpace(r.Parameter.SelectSQL)
 		baseSQL = strings.ReplaceAll(baseSQL, "\n", " ")
 		baseSQL = strings.ReplaceAll(baseSQL, "\r", " ")
 
@@ -243,35 +240,28 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 			baseSQL = baseSQL[selectIndex:]
 		}
 
-		// 提取FROM子句
-		fromIndex := strings.Index(strings.ToUpper(baseSQL), " FROM ")
-		if fromIndex == -1 {
-			return 0, fmt.Errorf("无法从selectSql中解析FROM子句")
-		}
-
-		// 提取表名和条件
-		fromClause := baseSQL[fromIndex:]
-
-		// 检查是否同时存在 where 条件
+		// 如果存在 where 条件，添加到 baseSQL 中
 		if r.Parameter.Where != "" {
-			// 检查 fromClause 中是否已经包含 WHERE 子句
-			whereIndex := strings.Index(strings.ToUpper(fromClause), " WHERE ")
+			// 检查 baseSQL 中是否已经包含 WHERE 子句
+			whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
 			if whereIndex == -1 {
 				// 如果不包含 WHERE 子句，添加 where 条件
-				fromClause += " WHERE " + r.Parameter.Where
+				baseSQL += " WHERE " + r.Parameter.Where
 			} else {
 				// 如果已包含 WHERE 子句，使用 AND 连接条件
-				fromClause = fromClause[:whereIndex+7] + "(" + fromClause[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
+				baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
 			}
 		}
-		query = "SELECT COUNT(*)" + fromClause
-	} else if r.Parameter.Where != "" {
-		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE %s",
-			r.Parameter.Table,
-			r.Parameter.Where,
-		)
+		// 使用子查询方式获取总记录数
+		query = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS cnt", baseSQL)
 	} else {
-		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s`", r.Parameter.Table)
+		// 构建基础查询
+		baseSQL := fmt.Sprintf("SELECT * FROM `%s`", r.Parameter.Table)
+		if r.Parameter.Where != "" {
+			baseSQL += " WHERE " + r.Parameter.Where
+		}
+		// 使用子查询方式获取总记录数
+		query = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS cnt", baseSQL)
 	}
 
 	log.Printf("计算总记录数的SQL: %s", query)
