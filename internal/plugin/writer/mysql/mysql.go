@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -49,8 +50,8 @@ func NewMySQLWriter(parameter *Parameter) *MySQLWriter {
 
 // Connect 连接MySQL数据库
 func (w *MySQLWriter) Connect() error {
-	// 在 DSN 中设置更大的 maxAllowedPacket
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
+	// 在 DSN 中设置更多的连接参数
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true&timeout=30s&writeTimeout=30s&readTimeout=30s",
 		w.Parameter.Username,
 		w.Parameter.Password,
 		w.Parameter.Host,
@@ -64,26 +65,18 @@ func (w *MySQLWriter) Connect() error {
 	}
 
 	// 优化连接池配置
-	db.SetMaxIdleConns(24)                  // 最小空闲连接数
-	db.SetMaxOpenConns(50)                  // 最大连接数
+	db.SetMaxIdleConns(10)                  // 最小空闲连接数
+	db.SetMaxOpenConns(20)                  // 最大连接数
 	db.SetConnMaxLifetime(time.Hour)        // 连接最大生命周期
 	db.SetConnMaxIdleTime(30 * time.Minute) // 空闲连接最大生命周期
 
 	// 测试连接
-	err = db.Ping()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = db.PingContext(ctx)
 	if err != nil {
 		return fmt.Errorf("ping MySQL失败: %v", err)
-	}
-
-	// 设置会话变量以优化写入性能（只设置会话级别的变量）
-	_, err = db.Exec(`
-		SET SESSION
-		unique_checks = 0,
-		foreign_key_checks = 0,
-		sql_mode = ''
-	`)
-	if err != nil {
-		log.Printf("设置会话变量失败: %v", err)
 	}
 
 	w.DB = db
@@ -254,29 +247,6 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 		return nil
 	}
 
-	// 设置会话变量以提高性能
-	_, err := w.DB.Exec(`
-		SET SESSION
-		unique_checks = 0,
-		foreign_key_checks = 0,
-		sql_log_bin = 0
-	`)
-	if err != nil {
-		return fmt.Errorf("设置会话变量失败: %v", err)
-	}
-	defer func() {
-		// 恢复会话变量
-		_, err := w.DB.Exec(`
-			SET SESSION
-			unique_checks = 1,
-			foreign_key_checks = 1,
-			sql_log_bin = 1
-		`)
-		if err != nil {
-			log.Printf("恢复会话变量失败: %v", err)
-		}
-	}()
-
 	// 计算每批次最大记录数，考虑MySQL占位符限制
 	columnCount := len(w.Parameter.Columns)
 	maxPlaceholders := 65535 // MySQL最大占位符数量
@@ -322,7 +292,7 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 			if j > 0 {
 				sqlBuilder.WriteByte(',')
 			}
-			sqlBuilder.WriteString("ROW(")
+			sqlBuilder.WriteString("(")
 			for k := range w.Parameter.Columns {
 				if k > 0 {
 					sqlBuilder.WriteByte(',')
@@ -370,10 +340,7 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 		// 每10秒输出一次进度日志
 		now := time.Now()
 		if now.Sub(lastLogTime) >= 10*time.Second {
-			elapsed := now.Sub(startTime)
-			speed := float64(i+len(batch)) / elapsed.Seconds()
-			progress := float64(i+len(batch)) / float64(len(records)) * 100
-			log.Printf("写入进度: %.2f%%, 速度: %.2f 条/秒", progress, speed)
+			log.Printf("已处理 %d 条记录, 耗时: %v", totalRecords, now.Sub(startTime))
 			lastLogTime = now
 		}
 	}
@@ -383,10 +350,7 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 		return fmt.Errorf("提交最后的事务失败: %v", err)
 	}
 
-	elapsed := time.Since(startTime)
-	speed := float64(len(records)) / elapsed.Seconds()
-	log.Printf("写入完成，总耗时: %.2f秒, 平均速度: %.2f 条/秒", elapsed.Seconds(), speed)
-
+	log.Printf("写入完成，共处理 %d 条记录, 总耗时: %v", totalRecords, time.Since(startTime))
 	return nil
 }
 
@@ -394,28 +358,22 @@ func (w *MySQLWriter) Write(records [][]interface{}) error {
 func (w *MySQLWriter) Close() error {
 	var errs []error
 
+	// 如果存在未完成的事务，进行回滚
 	if w.tx != nil {
 		if err := w.RollbackTransaction(); err != nil {
 			errs = append(errs, fmt.Errorf("回滚事务失败: %v", err))
 		}
 	}
 
+	// 关闭数据库连接
 	if w.DB != nil {
-		if _, err := w.DB.Exec(`
-			SET SESSION
-			unique_checks = 1,
-			foreign_key_checks = 1
-		`); err != nil {
-			errs = append(errs, fmt.Errorf("恢复会话变量失败: %v", err))
-		}
-
 		if err := w.DB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("关闭数据库连接失败: %v", err))
 		}
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("关闭过程中发生多个错误: %v", errs)
+		return fmt.Errorf("关闭过程中发生错误: %v", errs)
 	}
 	return nil
 }
