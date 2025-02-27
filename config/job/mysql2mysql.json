@@ -13,7 +13,7 @@
             "table": "users",
             "columns": [],
             "selectSql": "select username, email, age, created_at, updated_at from users",
-            "where": "",
+            "where": "id > 10000",
             "batchSize": 20000
           }
         },
@@ -33,7 +33,7 @@
               "created_at",
               "updated_at"
             ],
-            "batchSize": 10000,
+            "batchSize": 20000,
             "preSql": ["select count(*) from users", "truncate users"],
             "postSql": ["select count(*) from users"],
             "writeMode": "replace"

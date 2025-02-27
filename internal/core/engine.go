@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -30,14 +31,27 @@ func (e *DataXEngine) Start() error {
 	content := e.jobConfig.Job.Content[0]
 
 	// 打印JSON格式的配置信息
-	readerJSON, _ := json.MarshalIndent(content.Reader, "", "  ")
-	writerJSON, _ := json.MarshalIndent(content.Writer, "", "  ")
-	settingJSON, _ := json.MarshalIndent(e.jobConfig.Job.Setting, "", "  ")
+	var readerBuf, writerBuf, settingBuf bytes.Buffer
+
+	readerEncoder := json.NewEncoder(&readerBuf)
+	readerEncoder.SetIndent("", "  ")
+	readerEncoder.SetEscapeHTML(false)
+	readerEncoder.Encode(content.Reader)
+
+	writerEncoder := json.NewEncoder(&writerBuf)
+	writerEncoder.SetIndent("", "  ")
+	writerEncoder.SetEscapeHTML(false)
+	writerEncoder.Encode(content.Writer)
+
+	settingEncoder := json.NewEncoder(&settingBuf)
+	settingEncoder.SetIndent("", "  ")
+	settingEncoder.SetEscapeHTML(false)
+	settingEncoder.Encode(e.jobConfig.Job.Setting)
 
 	log.Printf("开始数据同步任务:")
-	log.Printf("Reader配置:\n%s", readerJSON)
-	log.Printf("Writer配置:\n%s", writerJSON)
-	log.Printf("任务设置:\n%s", settingJSON)
+	log.Printf("Reader配置:\n%s", readerBuf.String())
+	log.Printf("Writer配置:\n%s", writerBuf.String())
+	log.Printf("任务设置:\n%s", settingBuf.String())
 
 	// 创建Reader
 	factoryMutex.RLock()
@@ -100,9 +114,11 @@ func (e *DataXEngine) Start() error {
 	log.Printf("根据数据量(%d)自动调整批次大小为: %d", totalCount, batchSize)
 
 	// 执行预处理
+	log.Printf("开始执行预处理操作...")
 	if err := e.writer.PreProcess(); err != nil {
 		return fmt.Errorf("执行预处理失败: %v", err)
 	}
+	log.Printf("预处理操作执行完成")
 
 	// 读取并写入数据
 	startTime := time.Now()
@@ -138,6 +154,12 @@ func (e *DataXEngine) Start() error {
 		log.Printf("进度: %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒",
 			progress, processedCount, totalCount, speed)
 
+		// 检查是否已处理完所有数据
+		if processedCount >= totalCount {
+			log.Printf("已处理完所有数据，总记录数: %d", totalCount)
+			break
+		}
+
 		// 检查错误限制
 		if e.jobConfig.Job.Setting.ErrorLimit.Record > 0 &&
 			errorCount >= int64(e.jobConfig.Job.Setting.ErrorLimit.Record) {
@@ -145,10 +167,17 @@ func (e *DataXEngine) Start() error {
 		}
 	}
 
+	// 验证处理记录数与总记录数
+	if processedCount > totalCount {
+		log.Printf("警告: 处理记录数(%d)大于总记录数(%d)，可能存在数据不一致", processedCount, totalCount)
+	}
+
 	// 执行后处理
+	log.Printf("开始执行后处理操作...")
 	if err := e.writer.PostProcess(); err != nil {
 		return fmt.Errorf("执行后处理失败: %v", err)
 	}
+	log.Printf("后处理操作执行完成")
 
 	elapsed := time.Since(startTime)
 	speed := float64(processedCount) / elapsed.Seconds()

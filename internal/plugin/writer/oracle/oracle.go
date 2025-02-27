@@ -3,6 +3,7 @@ package oracle
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -76,13 +77,21 @@ func (w *OracleWriter) Connect() error {
 // PreProcess 执行写入前的SQL操作
 func (w *OracleWriter) PreProcess() error {
 	if w.Parameter.PreSQL == "" {
+		log.Println("没有配置预处理SQL语句")
 		return nil
 	}
 
-	_, err := w.DB.Exec(w.Parameter.PreSQL)
+	log.Printf("执行预处理SQL: %s", w.Parameter.PreSQL)
+	startTime := time.Now()
+
+	result, err := w.DB.Exec(w.Parameter.PreSQL)
 	if err != nil {
+		log.Printf("执行预处理SQL失败: %v", err)
 		return fmt.Errorf("执行PreSQL失败: %v", err)
 	}
+
+	rowsAffected, _ := result.RowsAffected()
+	log.Printf("预处理SQL执行成功, 影响行数: %d, 耗时: %v", rowsAffected, time.Since(startTime))
 
 	return nil
 }
@@ -90,13 +99,21 @@ func (w *OracleWriter) PreProcess() error {
 // PostProcess 执行写入后的SQL操作
 func (w *OracleWriter) PostProcess() error {
 	if w.Parameter.PostSQL == "" {
+		log.Println("没有配置后处理SQL语句")
 		return nil
 	}
 
-	_, err := w.DB.Exec(w.Parameter.PostSQL)
+	log.Printf("执行后处理SQL: %s", w.Parameter.PostSQL)
+	startTime := time.Now()
+
+	result, err := w.DB.Exec(w.Parameter.PostSQL)
 	if err != nil {
+		log.Printf("执行后处理SQL失败: %v", err)
 		return fmt.Errorf("执行PostSQL失败: %v", err)
 	}
+
+	rowsAffected, _ := result.RowsAffected()
+	log.Printf("后处理SQL执行成功, 影响行数: %d, 耗时: %v", rowsAffected, time.Since(startTime))
 
 	return nil
 }

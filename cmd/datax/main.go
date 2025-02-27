@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,41 +17,63 @@ import (
 	pgWriter "datax/internal/plugin/writer/postgresql"
 )
 
+// 版本信息，在编译时通过 -ldflags 注入
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	CommitID  = "unknown"
+)
+
 // registerReaderPlugin 动态注册Reader插件
 func registerReaderPlugin(name string) error {
 	switch name {
 	case "mysqlreader":
 		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
-			paramBytes, err := json.Marshal(parameter)
-			if err != nil {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(parameter); err != nil {
 				return nil, err
 			}
+			paramBytes := buf.Bytes()
 			var p mysqlReader.Parameter
-			if err := json.Unmarshal(paramBytes, &p); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(paramBytes))
+			decoder.UseNumber()
+			if err := decoder.Decode(&p); err != nil {
 				return nil, err
 			}
 			return mysqlReader.NewMySQLReader(&p), nil
 		})
 	case "postgresqlreader":
 		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
-			paramBytes, err := json.Marshal(parameter)
-			if err != nil {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(parameter); err != nil {
 				return nil, err
 			}
+			paramBytes := buf.Bytes()
 			var p pgReader.Parameter
-			if err := json.Unmarshal(paramBytes, &p); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(paramBytes))
+			decoder.UseNumber()
+			if err := decoder.Decode(&p); err != nil {
 				return nil, err
 			}
 			return pgReader.NewPostgreSQLReader(&p), nil
 		})
 	case "oraclereader":
 		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
-			paramBytes, err := json.Marshal(parameter)
-			if err != nil {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(parameter); err != nil {
 				return nil, err
 			}
+			paramBytes := buf.Bytes()
 			var p oracleReader.Parameter
-			if err := json.Unmarshal(paramBytes, &p); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(paramBytes))
+			decoder.UseNumber()
+			if err := decoder.Decode(&p); err != nil {
 				return nil, err
 			}
 			return oracleReader.NewOracleReader(&p), nil
@@ -66,36 +89,51 @@ func registerWriterPlugin(name string) error {
 	switch name {
 	case "mysqlwriter":
 		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
-			paramBytes, err := json.Marshal(parameter)
-			if err != nil {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(parameter); err != nil {
 				return nil, err
 			}
+			paramBytes := buf.Bytes()
 			var p mysqlWriter.Parameter
-			if err := json.Unmarshal(paramBytes, &p); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(paramBytes))
+			decoder.UseNumber()
+			if err := decoder.Decode(&p); err != nil {
 				return nil, err
 			}
 			return mysqlWriter.NewMySQLWriter(&p), nil
 		})
 	case "postgresqlwriter":
 		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
-			paramBytes, err := json.Marshal(parameter)
-			if err != nil {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(parameter); err != nil {
 				return nil, err
 			}
+			paramBytes := buf.Bytes()
 			var p pgWriter.Parameter
-			if err := json.Unmarshal(paramBytes, &p); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(paramBytes))
+			decoder.UseNumber()
+			if err := decoder.Decode(&p); err != nil {
 				return nil, err
 			}
 			return pgWriter.NewPostgreSQLWriter(&p), nil
 		})
 	case "oraclewriter":
 		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
-			paramBytes, err := json.Marshal(parameter)
-			if err != nil {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(parameter); err != nil {
 				return nil, err
 			}
+			paramBytes := buf.Bytes()
 			var p oracleWriter.Parameter
-			if err := json.Unmarshal(paramBytes, &p); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(paramBytes))
+			decoder.UseNumber()
+			if err := decoder.Decode(&p); err != nil {
 				return nil, err
 			}
 			return oracleWriter.NewOracleWriter(&p), nil
@@ -109,12 +147,25 @@ func registerWriterPlugin(name string) error {
 func main() {
 	// 解析命令行参数
 	var jobFile string
+	var showVersion bool
 	flag.StringVar(&jobFile, "job", "", "任务配置文件路径")
+	flag.BoolVar(&showVersion, "version", false, "显示版本信息")
 	flag.Parse()
+
+	// 显示版本信息
+	if showVersion {
+		fmt.Printf("DataX 版本: %s\n", Version)
+		fmt.Printf("构建时间: %s\n", BuildTime)
+		fmt.Printf("提交ID: %s\n", CommitID)
+		return
+	}
 
 	if jobFile == "" {
 		log.Fatal("请指定任务配置文件路径")
 	}
+
+	// 输出版本信息
+	log.Printf("DataX 版本: %s, 构建时间: %s, 提交ID: %s", Version, BuildTime, CommitID)
 
 	// 读取任务配置文件
 	content, err := os.ReadFile(jobFile)
@@ -124,7 +175,10 @@ func main() {
 
 	// 解析任务配置
 	var jobConfig core.JobConfig
-	if err := json.Unmarshal(content, &jobConfig); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&jobConfig); err != nil {
 		log.Fatalf("解析任务配置失败: %v", err)
 	}
 

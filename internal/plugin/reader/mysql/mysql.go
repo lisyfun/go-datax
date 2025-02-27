@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -82,6 +83,11 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 
 	query := r.buildQuery()
 	log.Printf("执行查询: %s [offset=%d]", query, r.offset)
+
+	// 记录首次查询的SQL语句
+	if r.offset == 0 {
+		log.Printf("执行数据读取的SQL: %s", query)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -165,29 +171,48 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 
 // buildQuery 构建SQL查询语句
 func (r *MySQLReader) buildQuery() string {
-	var query string
 	if r.Parameter.SelectSQL != "" {
-		query = r.Parameter.SelectSQL
-	} else {
-		// 构建基础查询
-		columnsStr := "*"
-		if len(r.Parameter.Columns) > 0 {
-			columnsStr = fmt.Sprintf("`%s`", r.Parameter.Columns[0])
-			for _, col := range r.Parameter.Columns[1:] {
-				columnsStr += fmt.Sprintf(",`%s`", col)
+		baseSQL := r.Parameter.SelectSQL
+
+		// 检查是否同时存在 where 条件
+		if r.Parameter.Where != "" {
+			// 检查 selectSql 中是否已经包含 WHERE 子句
+			whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
+			if whereIndex == -1 {
+				// 如果不包含 WHERE 子句，添加 where 条件
+				baseSQL += " WHERE " + r.Parameter.Where
+			} else {
+				// 如果已包含 WHERE 子句，使用 AND 连接条件
+				baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
 			}
 		}
-		query = fmt.Sprintf("SELECT %s FROM `%s`", columnsStr, r.Parameter.Table)
-		if r.Parameter.Where != "" {
-			query += " WHERE " + r.Parameter.Where
+
+		// 添加分页
+		return fmt.Sprintf("%s LIMIT %d OFFSET %d",
+			baseSQL,
+			r.Parameter.BatchSize,
+			r.offset,
+		)
+	}
+
+	// 否则根据配置构建SQL
+	columnsStr := "*"
+	if len(r.Parameter.Columns) > 0 {
+		columnsStr = fmt.Sprintf("`%s`", r.Parameter.Columns[0])
+		for _, col := range r.Parameter.Columns[1:] {
+			columnsStr += fmt.Sprintf(",`%s`", col)
 		}
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM `%s`", columnsStr, r.Parameter.Table)
+
+	if r.Parameter.Where != "" {
+		query += " WHERE " + r.Parameter.Where
 	}
 
 	// 添加分页
 	query += fmt.Sprintf(" LIMIT %d OFFSET %d", r.Parameter.BatchSize, r.offset)
 
-	// 打印完整SQL
-	log.Printf("执行SQL: %s", query)
 	return query
 }
 
@@ -206,14 +231,47 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 	}
 
 	var query string
-	if r.Parameter.Where != "" {
-		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE %s",
-			r.Parameter.Table,
-			r.Parameter.Where,
-		)
+	if r.Parameter.SelectSQL != "" {
+		// 预处理SQL语句：移除换行符和多余的空格
+		baseSQL := strings.TrimSpace(r.Parameter.SelectSQL)
+		baseSQL = strings.ReplaceAll(baseSQL, "\n", " ")
+		baseSQL = strings.ReplaceAll(baseSQL, "\r", " ")
+
+		// 处理 REPLACE INTO 或 INSERT INTO 语句
+		if strings.HasPrefix(strings.ToUpper(baseSQL), "REPLACE INTO") ||
+			strings.HasPrefix(strings.ToUpper(baseSQL), "INSERT INTO") {
+			selectIndex := strings.Index(strings.ToUpper(baseSQL), "SELECT")
+			if selectIndex == -1 {
+				return 0, fmt.Errorf("无法从SQL语句中找到SELECT子句")
+			}
+			baseSQL = baseSQL[selectIndex:]
+		}
+
+		// 如果存在 where 条件，添加到 baseSQL 中
+		if r.Parameter.Where != "" {
+			// 检查 baseSQL 中是否已经包含 WHERE 子句
+			whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
+			if whereIndex == -1 {
+				// 如果不包含 WHERE 子句，添加 where 条件
+				baseSQL += " WHERE " + r.Parameter.Where
+			} else {
+				// 如果已包含 WHERE 子句，使用 AND 连接条件
+				baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
+			}
+		}
+		// 使用子查询方式获取总记录数
+		query = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS cnt", baseSQL)
 	} else {
-		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s`", r.Parameter.Table)
+		// 构建基础查询
+		baseSQL := fmt.Sprintf("SELECT * FROM `%s`", r.Parameter.Table)
+		if r.Parameter.Where != "" {
+			baseSQL += " WHERE " + r.Parameter.Where
+		}
+		// 使用子查询方式获取总记录数
+		query = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS cnt", baseSQL)
 	}
+
+	log.Printf("计算总记录数的SQL: %s", query)
 
 	var count int64
 	err := r.DB.QueryRow(query).Scan(&count)
