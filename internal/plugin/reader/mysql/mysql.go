@@ -264,20 +264,6 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 				fromClause = fromClause[:whereIndex+7] + "(" + fromClause[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
 			}
 		}
-
-		// 移除可能存在的ORDER BY, LIMIT等子句
-		orderByIndex := strings.Index(strings.ToUpper(fromClause), " ORDER BY ")
-		limitIndex := strings.Index(strings.ToUpper(fromClause), " LIMIT ")
-		groupByIndex := strings.Index(strings.ToUpper(fromClause), " GROUP BY ")
-
-		if orderByIndex != -1 {
-			fromClause = fromClause[:orderByIndex]
-		} else if limitIndex != -1 {
-			fromClause = fromClause[:limitIndex]
-		} else if groupByIndex != -1 {
-			fromClause = fromClause[:groupByIndex]
-		}
-
 		query = "SELECT COUNT(*)" + fromClause
 	} else if r.Parameter.Where != "" {
 		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE %s",
