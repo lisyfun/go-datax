@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 
 	"datax/internal/core"
+	"datax/internal/pkg/logger"
 	mysqlReader "datax/internal/plugin/reader/mysql"
 	oracleReader "datax/internal/plugin/reader/oracle"
 	pgReader "datax/internal/plugin/reader/postgresql"
@@ -23,6 +23,18 @@ var (
 	BuildTime = "unknown"
 	CommitID  = "unknown"
 )
+
+var log *logger.Logger
+
+func init() {
+	// 初始化日志记录器
+	log = logger.New(&logger.Option{
+		Level:     logger.LevelInfo,
+		Prefix:    "DataX",
+		WithTime:  true,
+		WithLevel: true,
+	})
+}
 
 // registerReaderPlugin 动态注册Reader插件
 func registerReaderPlugin(name string) error {
@@ -154,23 +166,25 @@ func main() {
 
 	// 显示版本信息
 	if showVersion {
-		fmt.Printf("DataX 版本: %s\n", Version)
-		fmt.Printf("构建时间: %s\n", BuildTime)
-		fmt.Printf("提交ID: %s\n", CommitID)
+		log.Info("DataX 版本: %s", Version)
+		log.Info("构建时间: %s", BuildTime)
+		log.Info("提交ID: %s", CommitID)
 		return
 	}
 
 	if jobFile == "" {
-		log.Fatal("请指定任务配置文件路径")
+		log.Error("请指定任务配置文件路径")
+		os.Exit(1)
 	}
 
 	// 输出版本信息
-	log.Printf("DataX 版本: %s, 构建时间: %s, 提交ID: %s", Version, BuildTime, CommitID)
+	log.Info("DataX 版本: %s, 构建时间: %s, 提交ID: %s", Version, BuildTime, CommitID)
 
 	// 读取任务配置文件
 	content, err := os.ReadFile(jobFile)
 	if err != nil {
-		log.Fatalf("读取任务配置文件失败: %v", err)
+		log.Error("读取任务配置文件失败: %v", err)
+		os.Exit(1)
 	}
 
 	// 解析任务配置
@@ -179,12 +193,14 @@ func main() {
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&jobConfig); err != nil {
-		log.Fatalf("解析任务配置失败: %v", err)
+		log.Error("解析任务配置失败: %v", err)
+		os.Exit(1)
 	}
 
 	// 验证配置
 	if len(jobConfig.Job.Content) == 0 {
-		log.Fatal("任务配置中没有content")
+		log.Error("任务配置中没有content")
+		os.Exit(1)
 	}
 
 	// 获取第一个任务内容
@@ -192,21 +208,24 @@ func main() {
 
 	// 动态注册Reader插件
 	if err := registerReaderPlugin(content0.Reader.Name); err != nil {
-		log.Fatalf("注册Reader插件失败: %v", err)
+		log.Error("注册Reader插件失败: %v", err)
+		os.Exit(1)
 	}
 
 	// 动态注册Writer插件
 	if err := registerWriterPlugin(content0.Writer.Name); err != nil {
-		log.Fatalf("注册Writer插件失败: %v", err)
+		log.Error("注册Writer插件失败: %v", err)
+		os.Exit(1)
 	}
 
 	// 创建引擎
 	engine := core.NewDataXEngine(&jobConfig)
 
 	// 开始数据同步
-	log.Println("开始数据同步任务...")
+	log.Info("开始数据同步任务...")
 	if err := engine.Start(); err != nil {
-		log.Fatalf("数据同步失败: %v", err)
+		log.Error("数据同步失败: %v", err)
+		os.Exit(1)
 	}
-	log.Println("数据同步完成!")
+	log.Info("数据同步完成!")
 }

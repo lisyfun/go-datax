@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
+
+	"datax/internal/pkg/logger"
 )
 
 // DataXEngine 数据同步引擎
@@ -13,12 +14,22 @@ type DataXEngine struct {
 	jobConfig *JobConfig
 	reader    Reader
 	writer    Writer
+	logger    *logger.Logger
 }
 
 // NewDataXEngine 创建新的数据同步引擎
 func NewDataXEngine(config *JobConfig) *DataXEngine {
+	// 创建日志记录器
+	l := logger.New(&logger.Option{
+		Level:     logger.LevelInfo, // 默认使用 INFO 级别
+		Prefix:    "DataXEngine",
+		WithTime:  true,
+		WithLevel: true,
+	})
+
 	return &DataXEngine{
 		jobConfig: config,
+		logger:    l,
 	}
 }
 
@@ -68,7 +79,7 @@ func (e *DataXEngine) Start() error {
 		return fmt.Errorf("格式化配置信息失败: %v", err)
 	}
 
-	log.Printf("任务配置信息:\n%s", configBuf.String())
+	e.logger.Info("任务配置信息:\n%s", configBuf.String())
 
 	// 创建Reader
 	factoryMutex.RLock()
@@ -115,7 +126,7 @@ func (e *DataXEngine) Start() error {
 	if err != nil {
 		return fmt.Errorf("获取总记录数失败: %v", err)
 	}
-	log.Printf("总记录数: %d", totalCount)
+	e.logger.Info("总记录数: %d", totalCount)
 
 	// 根据数据量动态调整批次大小
 	batchSize := calculateBatchSize(totalCount)
@@ -128,14 +139,14 @@ func (e *DataXEngine) Start() error {
 		wp["batchSize"] = batchSize
 	}
 
-	log.Printf("根据数据量(%d)自动调整批次大小为: %d", totalCount, batchSize)
+	e.logger.Info("根据数据量(%d)自动调整批次大小为: %d", totalCount, batchSize)
 
 	// 执行预处理
-	log.Printf("开始执行预处理操作...")
+	e.logger.Info("开始执行预处理操作...")
 	if err := e.writer.PreProcess(); err != nil {
 		return fmt.Errorf("执行预处理失败: %v", err)
 	}
-	log.Printf("预处理操作执行完成")
+	e.logger.Info("预处理操作执行完成")
 
 	// 读取并写入数据
 	startTime := time.Now()
@@ -165,12 +176,12 @@ func (e *DataXEngine) Start() error {
 		elapsed := time.Since(startTime)
 		speed := float64(processedCount) / elapsed.Seconds()
 		progress := float64(processedCount) / float64(totalCount) * 100
-		log.Printf("进度: %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒",
+		e.logger.Info("进度: %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒",
 			progress, processedCount, totalCount, speed)
 
 		// 检查是否已处理完所有数据
 		if processedCount >= totalCount {
-			log.Printf("已处理完所有数据，总记录数: %d", totalCount)
+			e.logger.Info("已处理完所有数据，总记录数: %d", totalCount)
 			break
 		}
 
@@ -183,19 +194,19 @@ func (e *DataXEngine) Start() error {
 
 	// 验证处理记录数与总记录数
 	if processedCount > totalCount {
-		log.Printf("警告: 处理记录数(%d)大于总记录数(%d)，可能存在数据不一致", processedCount, totalCount)
+		e.logger.Warn("处理记录数(%d)大于总记录数(%d)，可能存在数据不一致", processedCount, totalCount)
 	}
 
 	// 执行后处理
-	log.Printf("开始执行后处理操作...")
+	e.logger.Info("开始执行后处理操作...")
 	if err := e.writer.PostProcess(); err != nil {
 		return fmt.Errorf("执行后处理失败: %v", err)
 	}
-	log.Printf("后处理操作执行完成")
+	e.logger.Info("后处理操作执行完成")
 
 	elapsed := time.Since(startTime)
 	speed := float64(processedCount) / elapsed.Seconds()
-	log.Printf("数据同步完成! 总耗时: %v, 处理记录数: %d, 错误记录数: %d, 平均速度: %.2f 条/秒",
+	e.logger.Info("数据同步完成! 总耗时: %v, 处理记录数: %d, 错误记录数: %d, 平均速度: %.2f 条/秒",
 		elapsed, processedCount, errorCount, speed)
 
 	return nil

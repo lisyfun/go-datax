@@ -4,21 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
+	"datax/internal/pkg/logger"
+
 	_ "github.com/go-sql-driver/mysql"
-)
-
-// LogLevel 日志级别
-type LogLevel int
-
-const (
-	LogLevelError LogLevel = iota
-	LogLevelWarn
-	LogLevelInfo
-	LogLevelDebug
 )
 
 // Parameter MySQL读取器参数结构体
@@ -33,7 +24,7 @@ type Parameter struct {
 	Where     string   `json:"where"`
 	SelectSQL string   `json:"selectSql"`
 	BatchSize int      `json:"batchSize"`
-	LogLevel  LogLevel `json:"logLevel"` // 日志级别
+	LogLevel  int      `json:"logLevel"` // 日志级别
 }
 
 // 批次大小的常量定义
@@ -48,64 +39,7 @@ type MySQLReader struct {
 	Parameter *Parameter
 	DB        *sql.DB
 	offset    int // 用于记录当前读取位置
-}
-
-// logf 根据日志级别打印日志
-func (r *MySQLReader) logf(level LogLevel, format string, v ...interface{}) {
-	if level <= r.Parameter.LogLevel {
-		prefix := ""
-		switch level {
-		case LogLevelError:
-			prefix = "[ERROR] "
-		case LogLevelWarn:
-			prefix = "[WARN] "
-		case LogLevelInfo:
-			prefix = "[INFO] "
-		case LogLevelDebug:
-			prefix = "[DEBUG] "
-		}
-		log.Printf(prefix+format, v...)
-	}
-}
-
-// calculateOptimalBatchSize 根据总记录数计算最优批次大小
-func calculateOptimalBatchSize(totalCount int64) int {
-	// 如果总记录数小于最小批次，直接返回总记录数
-	if totalCount < MinBatchSize {
-		return int(totalCount)
-	}
-
-	// 计算建议的批次数量（目标是将数据分成10-20个批次）
-	suggestedBatches := 15
-
-	// 计算每批次的记录数
-	batchSize := int(totalCount) / suggestedBatches
-
-	// 根据数据量范围调整批次大小
-	switch {
-	case totalCount <= 10000:
-		// 数据量较小，使用较小的批次
-		batchSize = MinBatchSize
-	case totalCount <= 100000:
-		// 中等数据量，批次大小在5000-10000之间
-		batchSize = max(5000, min(batchSize, 10000))
-	case totalCount <= 1000000:
-		// 大数据量，批次大小在10000-30000之间
-		batchSize = max(10000, min(batchSize, 30000))
-	default:
-		// 超大数据量，批次大小在20000-50000之间
-		batchSize = max(20000, min(batchSize, MaxBatchSize))
-	}
-
-	// 确保批次大小在合理范围内
-	if batchSize < MinBatchSize {
-		return MinBatchSize
-	}
-	if batchSize > MaxBatchSize {
-		return MaxBatchSize
-	}
-
-	return batchSize
+	logger    *logger.Logger
 }
 
 // NewMySQLReader 创建新的MySQL读取器实例
@@ -123,14 +57,18 @@ func NewMySQLReader(parameter *Parameter) *MySQLReader {
 		parameter.BatchSize = MaxBatchSize
 	}
 
-	// 默认日志级别为 Info
-	if parameter.LogLevel == 0 {
-		parameter.LogLevel = LogLevelInfo
-	}
+	// 创建日志记录器
+	l := logger.New(&logger.Option{
+		Level:     logger.Level(parameter.LogLevel),
+		Prefix:    "MySQLReader",
+		WithTime:  true,
+		WithLevel: true,
+	})
 
 	return &MySQLReader{
 		Parameter: parameter,
 		offset:    0,
+		logger:    l,
 	}
 }
 
@@ -178,7 +116,7 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	}
 
 	query := r.buildQuery()
-	r.logf(LogLevelDebug, "执行查询: %s [offset=%d, batchSize=%d]", query, r.offset, r.Parameter.BatchSize)
+	r.logger.Info("执行查询: %s [offset=%d, batchSize=%d]", query, r.offset, r.Parameter.BatchSize)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -208,7 +146,7 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	for rows.Next() {
 		err := rows.Scan(valuePtrs...)
 		if err != nil {
-			r.logf(LogLevelError, "扫描行数据失败: %v", err)
+			r.logger.Error("扫描行数据失败: %v", err)
 			continue
 		}
 
@@ -247,20 +185,8 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	}
 
 	recordCount := len(result)
-	// 只在首次查询或有异常时打印详细日志
-	if r.offset == 0 || recordCount != r.Parameter.BatchSize {
-		r.logf(LogLevelInfo, "查询结果: offset=%d, 批次大小=%d, 实际读取记录数=%d",
-			r.offset,
-			r.Parameter.BatchSize,
-			recordCount,
-		)
-	}
-
-	// 更新 offset，为下一次查询做准备
-	if recordCount > 0 {
-		r.offset += r.Parameter.BatchSize
-		r.logf(LogLevelDebug, "更新 offset 为: %d", r.offset)
-	}
+	r.logger.Info("成功读取 %d 条记录", recordCount)
+	r.offset += recordCount
 
 	return result, nil
 }
@@ -360,7 +286,7 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 		}
 	}
 
-	r.logf(LogLevelDebug, "计算总记录数的SQL: %s", query)
+	r.logger.Info("计算总记录数的SQL: %s", query)
 
 	var totalCount int64
 	err := r.DB.QueryRow(query).Scan(&totalCount)
@@ -374,7 +300,7 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 
 	// 如果批次大小有变化，记录日志
 	if originalBatchSize != r.Parameter.BatchSize {
-		r.logf(LogLevelInfo, "根据数据量(%d)自动调整批次大小: %d -> %d",
+		r.logger.Info("根据数据量(%d)自动调整批次大小: %d -> %d",
 			totalCount,
 			originalBatchSize,
 			r.Parameter.BatchSize,
@@ -384,7 +310,47 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 	return totalCount, nil
 }
 
-// 辅助函数：取最小值
+// calculateOptimalBatchSize 根据总记录数计算最优批次大小
+func calculateOptimalBatchSize(totalCount int64) int {
+	// 如果总记录数小于最小批次，直接返回总记录数
+	if totalCount < MinBatchSize {
+		return int(totalCount)
+	}
+
+	// 计算建议的批次数量（目标是将数据分成10-20个批次）
+	suggestedBatches := 15
+
+	// 计算每批次的记录数
+	batchSize := int(totalCount) / suggestedBatches
+
+	// 根据数据量范围调整批次大小
+	switch {
+	case totalCount <= 10000:
+		// 数据量较小，使用较小的批次
+		batchSize = MinBatchSize
+	case totalCount <= 100000:
+		// 中等数据量，批次大小在5000-10000之间
+		batchSize = max(5000, min(batchSize, 10000))
+	case totalCount <= 1000000:
+		// 大数据量，批次大小在10000-30000之间
+		batchSize = max(10000, min(batchSize, 30000))
+	default:
+		// 超大数据量，批次大小在20000-50000之间
+		batchSize = max(20000, min(batchSize, MaxBatchSize))
+	}
+
+	// 确保批次大小在合理范围内
+	if batchSize < MinBatchSize {
+		return MinBatchSize
+	}
+	if batchSize > MaxBatchSize {
+		return MaxBatchSize
+	}
+
+	return batchSize
+}
+
+// min 返回两个整数中的较小值
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -392,7 +358,7 @@ func min(a, b int) int {
 	return b
 }
 
-// 辅助函数：取最大值
+// max 返回两个整数中的较大值
 func max(a, b int) int {
 	if a > b {
 		return a

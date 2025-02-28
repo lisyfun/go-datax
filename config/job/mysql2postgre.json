@@ -12,8 +12,8 @@
             "database": "datax_source",
             "table": "users",
             "columns": [],
-            "selectSql": "select username, email, age, created_at, updated_at from users",
-            "where": "1=1",
+            "selectSql": "select username, email, age, created_at, updated_at from users where id > 100000",
+            "where": "",
             "batchSize": 20000
           }
         },
