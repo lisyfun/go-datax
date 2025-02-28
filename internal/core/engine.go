@@ -132,9 +132,6 @@ func (e *DataXEngine) Start() error {
 			return fmt.Errorf("读取数据失败: %v", err)
 		}
 
-		// 添加调试日志
-		log.Printf("本批次读取记录数: %d", len(records))
-
 		// 如果没有更多数据，退出循环
 		if len(records) == 0 {
 			break

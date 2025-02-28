@@ -25,6 +25,13 @@ type Parameter struct {
 	BatchSize int      `json:"batchSize"`
 }
 
+// 批次大小的常量定义
+const (
+	DefaultBatchSize = 20000 // 默认批次大小
+	MinBatchSize     = 1000  // 最小批次大小
+	MaxBatchSize     = 50000 // 最大批次大小
+)
+
 // MySQLReader MySQL读取器结构体
 type MySQLReader struct {
 	Parameter *Parameter
@@ -32,11 +39,61 @@ type MySQLReader struct {
 	offset    int // 用于记录当前读取位置
 }
 
+// calculateOptimalBatchSize 根据总记录数计算最优批次大小
+func calculateOptimalBatchSize(totalCount int64) int {
+	// 如果总记录数小于最小批次，直接返回总记录数
+	if totalCount < MinBatchSize {
+		return int(totalCount)
+	}
+
+	// 计算建议的批次数量（目标是将数据分成10-20个批次）
+	suggestedBatches := 15
+
+	// 计算每批次的记录数
+	batchSize := int(totalCount) / suggestedBatches
+
+	// 根据数据量范围调整批次大小
+	switch {
+	case totalCount <= 10000:
+		// 数据量较小，使用较小的批次
+		batchSize = MinBatchSize
+	case totalCount <= 100000:
+		// 中等数据量，批次大小在5000-10000之间
+		batchSize = max(5000, min(batchSize, 10000))
+	case totalCount <= 1000000:
+		// 大数据量，批次大小在10000-30000之间
+		batchSize = max(10000, min(batchSize, 30000))
+	default:
+		// 超大数据量，批次大小在20000-50000之间
+		batchSize = max(20000, min(batchSize, MaxBatchSize))
+	}
+
+	// 确保批次大小在合理范围内
+	if batchSize < MinBatchSize {
+		return MinBatchSize
+	}
+	if batchSize > MaxBatchSize {
+		return MaxBatchSize
+	}
+
+	return batchSize
+}
+
 // NewMySQLReader 创建新的MySQL读取器实例
 func NewMySQLReader(parameter *Parameter) *MySQLReader {
-	// 设置默认值
+	// 设置默认批次大小
 	if parameter.BatchSize == 0 {
-		parameter.BatchSize = 1000
+		parameter.BatchSize = DefaultBatchSize
+	}
+
+	// 确保批次大小在合理范围内
+	if parameter.BatchSize < MinBatchSize {
+		log.Printf("批次大小(%d)小于最小值，已自动调整为%d", parameter.BatchSize, MinBatchSize)
+		parameter.BatchSize = MinBatchSize
+	}
+	if parameter.BatchSize > MaxBatchSize {
+		log.Printf("批次大小(%d)超过最大限制，已自动调整为%d", parameter.BatchSize, MaxBatchSize)
+		parameter.BatchSize = MaxBatchSize
 	}
 
 	return &MySQLReader{
@@ -83,13 +140,13 @@ func (r *MySQLReader) Connect() error {
 }
 
 // Read 读取数据
-func (r *MySQLReader) Read() ([][]interface{}, error) {
+func (r *MySQLReader) Read() ([][]any, error) {
 	if r.DB == nil {
 		return nil, fmt.Errorf("数据库连接未初始化")
 	}
 
 	query := r.buildQuery()
-	log.Printf("执行查询: %s [offset=%d]", query, r.offset)
+	log.Printf("执行查询: %s [offset=%d, batchSize=%d]", query, r.offset, r.Parameter.BatchSize)
 
 	// 记录首次查询的SQL语句
 	if r.offset == 0 {
@@ -112,9 +169,9 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 	}
 
 	// 准备数据容器
-	var result [][]interface{}
-	values := make([]interface{}, len(columns))
-	valuePtrs := make([]interface{}, len(columns))
+	var result [][]any
+	values := make([]any, len(columns))
+	valuePtrs := make([]any, len(columns))
 
 	for i := range columns {
 		valuePtrs[i] = &values[i]
@@ -156,14 +213,6 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 		}
 
 		result = append(result, row)
-
-		// 打印当前批次信息
-		log.Printf("当前offset: %d, 本批次读取记录数: %d", r.offset, len(result))
-
-		// 只有在实际读取到数据时才更新 offset
-		if len(result) > 0 {
-			r.offset += len(result)
-		}
 	}
 
 	if err = rows.Err(); err != nil {
@@ -171,7 +220,17 @@ func (r *MySQLReader) Read() ([][]interface{}, error) {
 	}
 
 	recordCount := len(result)
-	log.Printf("查询结果: offset=%d, 记录数=%d", r.offset, recordCount)
+	log.Printf("查询结果: offset=%d, 批次大小=%d, 实际读取记录数=%d",
+		r.offset,
+		r.Parameter.BatchSize,
+		recordCount,
+	)
+
+	// 更新 offset，为下一次查询做准备
+	if recordCount > 0 {
+		r.offset += r.Parameter.BatchSize
+		log.Printf("更新 offset 为: %d", r.offset)
+	}
 
 	return result, nil
 }
@@ -231,7 +290,7 @@ func (r *MySQLReader) Close() error {
 	return nil
 }
 
-// GetTotalCount 获取总记录数
+// GetTotalCount 获取总记录数并动态调整批次大小
 func (r *MySQLReader) GetTotalCount() (int64, error) {
 	if r.DB == nil {
 		return 0, fmt.Errorf("数据库连接未初始化")
@@ -256,35 +315,57 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 
 		// 如果存在 where 条件，添加到 baseSQL 中
 		if r.Parameter.Where != "" {
-			// 检查 baseSQL 中是否已经包含 WHERE 子句
 			whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
 			if whereIndex == -1 {
-				// 如果不包含 WHERE 子句，添加 where 条件
 				baseSQL += " WHERE " + r.Parameter.Where
 			} else {
-				// 如果已包含 WHERE 子句，使用 AND 连接条件
 				baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
 			}
 		}
-		// 使用子查询方式获取总记录数
 		query = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS cnt", baseSQL)
 	} else {
-		// 构建基础查询
-		baseSQL := fmt.Sprintf("SELECT * FROM `%s`", r.Parameter.Table)
+		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s`", r.Parameter.Table)
 		if r.Parameter.Where != "" {
-			baseSQL += " WHERE " + r.Parameter.Where
+			query += " WHERE " + r.Parameter.Where
 		}
-		// 使用子查询方式获取总记录数
-		query = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS cnt", baseSQL)
 	}
 
 	log.Printf("计算总记录数的SQL: %s", query)
 
-	var count int64
-	err := r.DB.QueryRow(query).Scan(&count)
+	var totalCount int64
+	err := r.DB.QueryRow(query).Scan(&totalCount)
 	if err != nil {
 		return 0, fmt.Errorf("获取总记录数失败: %v", err)
 	}
 
-	return count, nil
+	// 根据总记录数动态调整批次大小
+	originalBatchSize := r.Parameter.BatchSize
+	r.Parameter.BatchSize = calculateOptimalBatchSize(totalCount)
+
+	// 如果批次大小有变化，记录日志
+	if originalBatchSize != r.Parameter.BatchSize {
+		log.Printf("根据数据量(%d)自动调整批次大小: %d -> %d",
+			totalCount,
+			originalBatchSize,
+			r.Parameter.BatchSize,
+		)
+	}
+
+	return totalCount, nil
+}
+
+// 辅助函数：取最小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// 辅助函数：取最大值
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
