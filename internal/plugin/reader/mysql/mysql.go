@@ -11,6 +11,16 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+// LogLevel 日志级别
+type LogLevel int
+
+const (
+	LogLevelError LogLevel = iota
+	LogLevelWarn
+	LogLevelInfo
+	LogLevelDebug
+)
+
 // Parameter MySQL读取器参数结构体
 type Parameter struct {
 	Username  string   `json:"username"`
@@ -23,6 +33,7 @@ type Parameter struct {
 	Where     string   `json:"where"`
 	SelectSQL string   `json:"selectSql"`
 	BatchSize int      `json:"batchSize"`
+	LogLevel  LogLevel `json:"logLevel"` // 日志级别
 }
 
 // 批次大小的常量定义
@@ -37,6 +48,24 @@ type MySQLReader struct {
 	Parameter *Parameter
 	DB        *sql.DB
 	offset    int // 用于记录当前读取位置
+}
+
+// logf 根据日志级别打印日志
+func (r *MySQLReader) logf(level LogLevel, format string, v ...interface{}) {
+	if level <= r.Parameter.LogLevel {
+		prefix := ""
+		switch level {
+		case LogLevelError:
+			prefix = "[ERROR] "
+		case LogLevelWarn:
+			prefix = "[WARN] "
+		case LogLevelInfo:
+			prefix = "[INFO] "
+		case LogLevelDebug:
+			prefix = "[DEBUG] "
+		}
+		log.Printf(prefix+format, v...)
+	}
 }
 
 // calculateOptimalBatchSize 根据总记录数计算最优批次大小
@@ -88,12 +117,15 @@ func NewMySQLReader(parameter *Parameter) *MySQLReader {
 
 	// 确保批次大小在合理范围内
 	if parameter.BatchSize < MinBatchSize {
-		log.Printf("批次大小(%d)小于最小值，已自动调整为%d", parameter.BatchSize, MinBatchSize)
 		parameter.BatchSize = MinBatchSize
 	}
 	if parameter.BatchSize > MaxBatchSize {
-		log.Printf("批次大小(%d)超过最大限制，已自动调整为%d", parameter.BatchSize, MaxBatchSize)
 		parameter.BatchSize = MaxBatchSize
+	}
+
+	// 默认日志级别为 Info
+	if parameter.LogLevel == 0 {
+		parameter.LogLevel = LogLevelInfo
 	}
 
 	return &MySQLReader{
@@ -146,12 +178,7 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	}
 
 	query := r.buildQuery()
-	log.Printf("执行查询: %s [offset=%d, batchSize=%d]", query, r.offset, r.Parameter.BatchSize)
-
-	// 记录首次查询的SQL语句
-	if r.offset == 0 {
-		log.Printf("执行数据读取的SQL: %s", query)
-	}
+	r.logf(LogLevelDebug, "执行查询: %s [offset=%d, batchSize=%d]", query, r.offset, r.Parameter.BatchSize)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -181,7 +208,7 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	for rows.Next() {
 		err := rows.Scan(valuePtrs...)
 		if err != nil {
-			log.Printf("扫描行数据失败: %v", err)
+			r.logf(LogLevelError, "扫描行数据失败: %v", err)
 			continue
 		}
 
@@ -220,16 +247,19 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	}
 
 	recordCount := len(result)
-	log.Printf("查询结果: offset=%d, 批次大小=%d, 实际读取记录数=%d",
-		r.offset,
-		r.Parameter.BatchSize,
-		recordCount,
-	)
+	// 只在首次查询或有异常时打印详细日志
+	if r.offset == 0 || recordCount != r.Parameter.BatchSize {
+		r.logf(LogLevelInfo, "查询结果: offset=%d, 批次大小=%d, 实际读取记录数=%d",
+			r.offset,
+			r.Parameter.BatchSize,
+			recordCount,
+		)
+	}
 
 	// 更新 offset，为下一次查询做准备
 	if recordCount > 0 {
 		r.offset += r.Parameter.BatchSize
-		log.Printf("更新 offset 为: %d", r.offset)
+		r.logf(LogLevelDebug, "更新 offset 为: %d", r.offset)
 	}
 
 	return result, nil
@@ -330,7 +360,7 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 		}
 	}
 
-	log.Printf("计算总记录数的SQL: %s", query)
+	r.logf(LogLevelDebug, "计算总记录数的SQL: %s", query)
 
 	var totalCount int64
 	err := r.DB.QueryRow(query).Scan(&totalCount)
@@ -344,7 +374,7 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 
 	// 如果批次大小有变化，记录日志
 	if originalBatchSize != r.Parameter.BatchSize {
-		log.Printf("根据数据量(%d)自动调整批次大小: %d -> %d",
+		r.logf(LogLevelInfo, "根据数据量(%d)自动调整批次大小: %d -> %d",
 			totalCount,
 			originalBatchSize,
 			r.Parameter.BatchSize,

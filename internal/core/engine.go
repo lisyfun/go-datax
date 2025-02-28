@@ -30,28 +30,45 @@ func (e *DataXEngine) Start() error {
 
 	content := e.jobConfig.Job.Content[0]
 
-	// 打印JSON格式的配置信息
-	var readerBuf, writerBuf, settingBuf bytes.Buffer
+	// 构建完整的配置信息
+	configInfo := struct {
+		Reader struct {
+			Name      string      `json:"name"`
+			Parameter interface{} `json:"parameter"`
+		} `json:"reader"`
+		Writer struct {
+			Name      string      `json:"name"`
+			Parameter interface{} `json:"parameter"`
+		} `json:"writer"`
+		Setting interface{} `json:"setting"`
+	}{
+		Reader: struct {
+			Name      string      `json:"name"`
+			Parameter interface{} `json:"parameter"`
+		}{
+			Name:      content.Reader.Name,
+			Parameter: content.Reader.Parameter,
+		},
+		Writer: struct {
+			Name      string      `json:"name"`
+			Parameter interface{} `json:"parameter"`
+		}{
+			Name:      content.Writer.Name,
+			Parameter: content.Writer.Parameter,
+		},
+		Setting: e.jobConfig.Job.Setting,
+	}
 
-	readerEncoder := json.NewEncoder(&readerBuf)
-	readerEncoder.SetIndent("", "  ")
-	readerEncoder.SetEscapeHTML(false)
-	readerEncoder.Encode(content.Reader)
+	// 打印格式化的配置信息
+	var configBuf bytes.Buffer
+	configEncoder := json.NewEncoder(&configBuf)
+	configEncoder.SetIndent("", "  ")
+	configEncoder.SetEscapeHTML(false)
+	if err := configEncoder.Encode(configInfo); err != nil {
+		return fmt.Errorf("格式化配置信息失败: %v", err)
+	}
 
-	writerEncoder := json.NewEncoder(&writerBuf)
-	writerEncoder.SetIndent("", "  ")
-	writerEncoder.SetEscapeHTML(false)
-	writerEncoder.Encode(content.Writer)
-
-	settingEncoder := json.NewEncoder(&settingBuf)
-	settingEncoder.SetIndent("", "  ")
-	settingEncoder.SetEscapeHTML(false)
-	settingEncoder.Encode(e.jobConfig.Job.Setting)
-
-	log.Printf("开始数据同步任务:")
-	log.Printf("Reader配置:\n%s", readerBuf.String())
-	log.Printf("Writer配置:\n%s", writerBuf.String())
-	log.Printf("任务设置:\n%s", settingBuf.String())
+	log.Printf("任务配置信息:\n%s", configBuf.String())
 
 	// 创建Reader
 	factoryMutex.RLock()
