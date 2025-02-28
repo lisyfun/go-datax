@@ -66,7 +66,7 @@ func NewMySQLWriter(parameter *Parameter) *MySQLWriter {
 // Connect 连接MySQL数据库
 func (w *MySQLWriter) Connect() error {
 	// 在 DSN 中设置更多的连接参数
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true&timeout=30s&writeTimeout=30s&readTimeout=30s",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true&timeout=10s&writeTimeout=30s&readTimeout=30s",
 		w.Parameter.Username,
 		w.Parameter.Password,
 		w.Parameter.Host,

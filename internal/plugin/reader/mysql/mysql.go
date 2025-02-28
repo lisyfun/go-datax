@@ -75,7 +75,7 @@ func NewMySQLReader(parameter *Parameter) *MySQLReader {
 // Connect 连接MySQL数据库
 func (r *MySQLReader) Connect() error {
 	// 在DSN中设置连接超时
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true&timeout=30s&writeTimeout=30s&readTimeout=30s",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true&timeout=10s&writeTimeout=30s&readTimeout=30s",
 		r.Parameter.Username,
 		r.Parameter.Password,
 		r.Parameter.Host,
