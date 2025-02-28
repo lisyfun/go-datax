@@ -17,7 +17,7 @@ COMMIT_ID=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 # 构建 Mac M1 (darwin/arm64) 版本
 echo -e "${YELLOW}构建 Mac M1 (darwin/arm64) 版本...${NC}"
-GOOS=darwin GOARCH=arm64 go build -ldflags="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.CommitID=${COMMIT_ID}'" -o bin/datax-darwin-arm64 ./cmd/datax
+GOOS=darwin GOARCH=arm64 go build -ldflags="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.CommitID=${COMMIT_ID}'" -o bin/datax-darwin-arm64 .
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}Mac M1 版本构建成功: bin/datax-darwin-arm64${NC}"
 else
@@ -26,7 +26,7 @@ fi
 
 # 构建 Linux ARM64 版本
 echo -e "${YELLOW}构建 Linux ARM64 版本...${NC}"
-GOOS=linux GOARCH=arm64 go build -ldflags="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.CommitID=${COMMIT_ID}'" -o bin/datax-linux-arm64 ./cmd/datax
+GOOS=linux GOARCH=arm64 go build -ldflags="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.CommitID=${COMMIT_ID}'" -o bin/datax-linux-arm64 .
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}Linux ARM64 版本构建成功: bin/datax-linux-arm64${NC}"
 else
@@ -35,7 +35,7 @@ fi
 
 # 构建 Linux x86_64 版本
 echo -e "${YELLOW}构建 Linux x86_64 版本...${NC}"
-GOOS=linux GOARCH=amd64 go build -ldflags="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.CommitID=${COMMIT_ID}'" -o bin/datax-linux-amd64 ./cmd/datax
+GOOS=linux GOARCH=amd64 go build -ldflags="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.CommitID=${COMMIT_ID}'" -o bin/datax-linux-amd64 .
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}Linux x86_64 版本构建成功: bin/datax-linux-amd64${NC}"
 else
