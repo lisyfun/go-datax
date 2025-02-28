@@ -5,8 +5,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 )
 
 // Level 日志级别
@@ -54,7 +52,7 @@ func New(opt *Option) *Logger {
 	// 设置日志输出
 	flags := 0
 	if opt.WithTime {
-		flags |= log.Ldate | log.Ltime | log.Lmicroseconds
+		flags |= log.Ldate | log.Ltime
 	}
 
 	if opt.LogFile != "" {
@@ -89,31 +87,9 @@ func (l *Logger) Close() error {
 	return nil
 }
 
-// getCaller 获取调用者信息
-func getCaller() (string, int) {
-	// 我们从第3层开始查找
-	for i := 3; i < 15; i++ { // 设置合理的最大查找深度
-		_, file, line, ok := runtime.Caller(i)
-		if !ok {
-			break
-		}
-		// 跳过对 logger 包自身的引用
-		if !strings.Contains(file, "pkg/logger") {
-			// 获取相对于工作目录的路径
-			if idx := strings.Index(file, "datax/"); idx != -1 {
-				return file[idx:], line
-			}
-			return filepath.Base(file), line
-		}
-	}
-	return "unknown", 0
-}
-
 // formatMessage 格式化日志消息
 func (l *Logger) formatMessage(level Level, format string, v ...interface{}) string {
 	// 获取调用者信息
-	file, line := getCaller()
-	caller := fmt.Sprintf("%s:%d", file, line)
 
 	// 构建日志前缀
 	prefix := ""
@@ -136,7 +112,7 @@ func (l *Logger) formatMessage(level Level, format string, v ...interface{}) str
 	msg := fmt.Sprintf(format, v...)
 
 	// 添加调用者信息
-	return fmt.Sprintf("%s [%s] %s", prefix, caller, msg)
+	return fmt.Sprintf("%s %s", prefix, msg)
 }
 
 // logf 根据日志级别打印日志
