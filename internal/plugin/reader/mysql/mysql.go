@@ -47,7 +47,8 @@ func NewMySQLReader(parameter *Parameter) *MySQLReader {
 
 // Connect 连接MySQL数据库
 func (r *MySQLReader) Connect() error {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+	// 在DSN中设置连接超时
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true&timeout=30s&writeTimeout=30s&readTimeout=30s",
 		r.Parameter.Username,
 		r.Parameter.Password,
 		r.Parameter.Host,
@@ -55,6 +56,7 @@ func (r *MySQLReader) Connect() error {
 		r.Parameter.Database,
 	)
 
+	// 打开数据库连接
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return fmt.Errorf("连接MySQL失败: %v", err)
@@ -63,10 +65,15 @@ func (r *MySQLReader) Connect() error {
 	// 设置连接池配置
 	db.SetMaxIdleConns(10)
 	db.SetMaxOpenConns(20)
+	db.SetConnMaxLifetime(time.Hour) // 设置连接最大生命周期为1小时
 	db.SetConnMaxIdleTime(30 * time.Minute)
 
-	// 测试连接
-	err = db.Ping()
+	// 创建一个带10秒超时的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 使用带超时的上下文测试连接
+	err = db.PingContext(ctx)
 	if err != nil {
 		return fmt.Errorf("ping MySQL失败: %v", err)
 	}
