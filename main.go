@@ -40,7 +40,7 @@ func init() {
 func registerReaderPlugin(name string) error {
 	switch name {
 	case "mysqlreader":
-		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
+		core.RegisterReader(name, func(parameter any) (core.Reader, error) {
 			var buf bytes.Buffer
 			encoder := json.NewEncoder(&buf)
 			encoder.SetEscapeHTML(false)
@@ -57,7 +57,7 @@ func registerReaderPlugin(name string) error {
 			return mysqlReader.NewMySQLReader(&p), nil
 		})
 	case "postgresqlreader":
-		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
+		core.RegisterReader(name, func(parameter any) (core.Reader, error) {
 			var buf bytes.Buffer
 			encoder := json.NewEncoder(&buf)
 			encoder.SetEscapeHTML(false)
@@ -74,7 +74,7 @@ func registerReaderPlugin(name string) error {
 			return pgReader.NewPostgreSQLReader(&p), nil
 		})
 	case "oraclereader":
-		core.RegisterReader(name, func(parameter interface{}) (core.Reader, error) {
+		core.RegisterReader(name, func(parameter any) (core.Reader, error) {
 			var buf bytes.Buffer
 			encoder := json.NewEncoder(&buf)
 			encoder.SetEscapeHTML(false)
@@ -100,7 +100,7 @@ func registerReaderPlugin(name string) error {
 func registerWriterPlugin(name string) error {
 	switch name {
 	case "mysqlwriter":
-		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
+		core.RegisterWriter(name, func(parameter any) (core.Writer, error) {
 			var buf bytes.Buffer
 			encoder := json.NewEncoder(&buf)
 			encoder.SetEscapeHTML(false)
@@ -117,7 +117,7 @@ func registerWriterPlugin(name string) error {
 			return mysqlWriter.NewMySQLWriter(&p), nil
 		})
 	case "postgresqlwriter":
-		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
+		core.RegisterWriter(name, func(parameter any) (core.Writer, error) {
 			var buf bytes.Buffer
 			encoder := json.NewEncoder(&buf)
 			encoder.SetEscapeHTML(false)
@@ -134,7 +134,7 @@ func registerWriterPlugin(name string) error {
 			return pgWriter.NewPostgreSQLWriter(&p), nil
 		})
 	case "oraclewriter":
-		core.RegisterWriter(name, func(parameter interface{}) (core.Writer, error) {
+		core.RegisterWriter(name, func(parameter any) (core.Writer, error) {
 			var buf bytes.Buffer
 			encoder := json.NewEncoder(&buf)
 			encoder.SetEscapeHTML(false)

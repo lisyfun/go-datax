@@ -88,7 +88,7 @@ func (l *Logger) Close() error {
 }
 
 // formatMessage 格式化日志消息
-func (l *Logger) formatMessage(level Level, format string, v ...interface{}) string {
+func (l *Logger) formatMessage(level Level, format string, v ...any) string {
 	// 获取调用者信息
 
 	// 构建日志前缀
@@ -116,29 +116,29 @@ func (l *Logger) formatMessage(level Level, format string, v ...interface{}) str
 }
 
 // logf 根据日志级别打印日志
-func (l *Logger) logf(level Level, format string, v ...interface{}) {
+func (l *Logger) logf(level Level, format string, v ...any) {
 	if level <= l.level {
 		l.stdLogger.Print(l.formatMessage(level, format, v...))
 	}
 }
 
 // Error 打印错误日志
-func (l *Logger) Error(format string, v ...interface{}) {
+func (l *Logger) Error(format string, v ...any) {
 	l.logf(LevelError, format, v...)
 }
 
 // Warn 打印警告日志
-func (l *Logger) Warn(format string, v ...interface{}) {
+func (l *Logger) Warn(format string, v ...any) {
 	l.logf(LevelWarn, format, v...)
 }
 
 // Info 打印信息日志
-func (l *Logger) Info(format string, v ...interface{}) {
+func (l *Logger) Info(format string, v ...any) {
 	l.logf(LevelInfo, format, v...)
 }
 
 // Debug 打印调试日志
-func (l *Logger) Debug(format string, v ...interface{}) {
+func (l *Logger) Debug(format string, v ...any) {
 	l.logf(LevelDebug, format, v...)
 }
 

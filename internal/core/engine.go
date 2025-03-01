@@ -44,25 +44,25 @@ func (e *DataXEngine) Start() error {
 	// 构建完整的配置信息
 	configInfo := struct {
 		Reader struct {
-			Name      string      `json:"name"`
-			Parameter interface{} `json:"parameter"`
+			Name      string `json:"name"`
+			Parameter any    `json:"parameter"`
 		} `json:"reader"`
 		Writer struct {
-			Name      string      `json:"name"`
-			Parameter interface{} `json:"parameter"`
+			Name      string `json:"name"`
+			Parameter any    `json:"parameter"`
 		} `json:"writer"`
-		Setting interface{} `json:"setting"`
+		Setting any `json:"setting"`
 	}{
 		Reader: struct {
-			Name      string      `json:"name"`
-			Parameter interface{} `json:"parameter"`
+			Name      string `json:"name"`
+			Parameter any    `json:"parameter"`
 		}{
 			Name:      content.Reader.Name,
 			Parameter: content.Reader.Parameter,
 		},
 		Writer: struct {
-			Name      string      `json:"name"`
-			Parameter interface{} `json:"parameter"`
+			Name      string `json:"name"`
+			Parameter any    `json:"parameter"`
 		}{
 			Name:      content.Writer.Name,
 			Parameter: content.Writer.Parameter,
@@ -132,10 +132,10 @@ func (e *DataXEngine) Start() error {
 	batchSize := calculateBatchSize(totalCount)
 
 	// 更新 Reader 和 Writer 的批次大小
-	if rp, ok := content.Reader.Parameter.(map[string]interface{}); ok {
+	if rp, ok := content.Reader.Parameter.(map[string]any); ok {
 		rp["batchSize"] = batchSize
 	}
-	if wp, ok := content.Writer.Parameter.(map[string]interface{}); ok {
+	if wp, ok := content.Writer.Parameter.(map[string]any); ok {
 		wp["batchSize"] = batchSize
 	}
 

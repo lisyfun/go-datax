@@ -354,7 +354,7 @@ func (w *MySQLWriter) Write(records [][]any) error {
 
 		// 构建完整的SQL语句
 		var values []string
-		var args []interface{}
+		var args []any
 
 		for _, record := range batch {
 			values = append(values, valueTemplate)

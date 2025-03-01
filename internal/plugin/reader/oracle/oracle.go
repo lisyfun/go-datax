@@ -85,7 +85,7 @@ func (r *OracleReader) Connect() error {
 }
 
 // Read 读取数据
-func (r *OracleReader) Read() ([][]interface{}, error) {
+func (r *OracleReader) Read() ([][]any, error) {
 	if r.DB == nil {
 		return nil, fmt.Errorf("数据库连接未初始化")
 	}
@@ -107,9 +107,9 @@ func (r *OracleReader) Read() ([][]interface{}, error) {
 	}
 
 	// 准备数据容器
-	var result [][]interface{}
-	values := make([]interface{}, len(columns))
-	valuePtrs := make([]interface{}, len(columns))
+	var result [][]any
+	values := make([]any, len(columns))
+	valuePtrs := make([]any, len(columns))
 
 	for i := range columns {
 		valuePtrs[i] = &values[i]
@@ -124,7 +124,7 @@ func (r *OracleReader) Read() ([][]interface{}, error) {
 		}
 
 		// 处理特殊类型
-		row := make([]interface{}, len(columns))
+		row := make([]any, len(columns))
 		for i, val := range values {
 			switch v := val.(type) {
 			case []byte:

@@ -151,7 +151,7 @@ func (r *MySQLReader) Read() ([][]any, error) {
 		}
 
 		// 处理特殊类型
-		row := make([]interface{}, len(columns))
+		row := make([]any, len(columns))
 		for i, val := range values {
 			switch v := val.(type) {
 			case []byte:

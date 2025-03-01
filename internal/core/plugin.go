@@ -7,7 +7,7 @@ import (
 // Reader 数据读取器接口
 type Reader interface {
 	Connect() error
-	Read() ([][]interface{}, error)
+	Read() ([][]any, error)
 	Close() error
 	GetTotalCount() (int64, error)
 }
@@ -15,17 +15,17 @@ type Reader interface {
 // Writer 数据写入器接口
 type Writer interface {
 	Connect() error
-	Write(records [][]interface{}) error
+	Write(records [][]any) error
 	Close() error
 	PreProcess() error
 	PostProcess() error
 }
 
 // ReaderFactory Reader工厂函数类型
-type ReaderFactory func(parameter interface{}) (Reader, error)
+type ReaderFactory func(parameter any) (Reader, error)
 
 // WriterFactory Writer工厂函数类型
-type WriterFactory func(parameter interface{}) (Writer, error)
+type WriterFactory func(parameter any) (Writer, error)
 
 var (
 	readerFactories = make(map[string]ReaderFactory)
@@ -52,12 +52,12 @@ type JobConfig struct {
 	Job struct {
 		Content []struct {
 			Reader struct {
-				Name      string      `json:"name"`
-				Parameter interface{} `json:"parameter"`
+				Name      string `json:"name"`
+				Parameter any    `json:"parameter"`
 			} `json:"reader"`
 			Writer struct {
-				Name      string      `json:"name"`
-				Parameter interface{} `json:"parameter"`
+				Name      string `json:"name"`
+				Parameter any    `json:"parameter"`
 			} `json:"writer"`
 		} `json:"content"`
 		Setting struct {

@@ -112,8 +112,8 @@ func (w *PostgreSQLWriter) PreProcess() error {
 				}
 
 				// 创建一个切片来存储所有列的值
-				values := make([]interface{}, len(columns))
-				valuePtrs := make([]interface{}, len(columns))
+				values := make([]any, len(columns))
+				valuePtrs := make([]any, len(columns))
 				for i := range columns {
 					valuePtrs[i] = &values[i]
 				}
@@ -179,8 +179,8 @@ func (w *PostgreSQLWriter) PostProcess() error {
 				}
 
 				// 创建一个切片来存储所有列的值
-				values := make([]interface{}, len(columns))
-				valuePtrs := make([]interface{}, len(columns))
+				values := make([]any, len(columns))
+				valuePtrs := make([]any, len(columns))
 				for i := range columns {
 					valuePtrs[i] = &values[i]
 				}
@@ -217,7 +217,7 @@ func (w *PostgreSQLWriter) PostProcess() error {
 }
 
 // Write 写入数据
-func (w *PostgreSQLWriter) Write(records [][]interface{}) error {
+func (w *PostgreSQLWriter) Write(records [][]any) error {
 	if w.DB == nil {
 		return fmt.Errorf("数据库连接未初始化")
 	}

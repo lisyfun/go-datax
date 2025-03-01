@@ -119,7 +119,7 @@ func (w *OracleWriter) PostProcess() error {
 }
 
 // Write 写入数据
-func (w *OracleWriter) Write(records [][]interface{}) error {
+func (w *OracleWriter) Write(records [][]any) error {
 	if w.DB == nil {
 		return fmt.Errorf("数据库连接未初始化")
 	}
