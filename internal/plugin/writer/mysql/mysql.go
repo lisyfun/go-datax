@@ -284,6 +284,12 @@ func (w *MySQLWriter) Write(records [][]any) error {
 		return nil
 	}
 
+	// 检查列数是否为0
+	columnsCount := len(w.Parameter.Columns)
+	if columnsCount == 0 {
+		return fmt.Errorf("列数不能为0，请检查配置的columns参数")
+	}
+
 	// 查询 max_allowed_packet 配置
 	var variableName string
 	var maxAllowedPacket int64
@@ -308,7 +314,6 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	// 预留 20% 的空间作为安全边界
 	avgFieldSize := 100
 	recordOverhead := 20
-	columnsCount := len(w.Parameter.Columns)
 	estimatedRowSize := columnsCount*avgFieldSize + recordOverhead
 	maxRowsPerPacket := int(float64(maxAllowedPacket) * 0.8 / float64(estimatedRowSize))
 
