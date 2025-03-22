@@ -11,8 +11,8 @@
             "port": 13306,
             "database": "datax_source",
             "table": "users",
-            "columns": [],
-            "selectSql": "select username, email, age, created_at, updated_at from users where id > 100000",
+            "columns": ["*"],
+            "selectSql": "",
             "where": "",
             "batchSize": 20000
           }
@@ -27,11 +27,7 @@
             "database": "datax_target",
             "table": "users",
             "columns": [
-              "username",
-              "email",
-              "age",
-              "created_at",
-              "updated_at"
+              "*"
             ],
             "batchSize": 20000,
             "preSql": ["select count(*) from users", "truncate users"],

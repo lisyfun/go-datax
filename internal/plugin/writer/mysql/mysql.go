@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"datax/internal/pkg/logger"
+	"datax/internal/plugin/common"
 )
 
 // Parameter MySQL写入器参数结构体
@@ -33,6 +34,9 @@ type MySQLWriter struct {
 	tx        *sql.Tx // 当前事务
 	logger    *logger.Logger
 }
+
+// Ensure MySQLWriter implements ColumnAwareWriter
+var _ common.ColumnAwareWriter = (*MySQLWriter)(nil)
 
 // NewMySQLWriter 创建新的MySQL写入器实例
 func NewMySQLWriter(parameter *Parameter) *MySQLWriter {
@@ -60,6 +64,32 @@ func NewMySQLWriter(parameter *Parameter) *MySQLWriter {
 	return &MySQLWriter{
 		Parameter: parameter,
 		logger:    l,
+	}
+}
+
+// SetColumns 设置要写入的列名（实现ColumnAwareWriter接口）
+func (w *MySQLWriter) SetColumns(columns []string) {
+	// 检查是否有意义的列名数据
+	if len(columns) == 0 {
+		w.logger.Debug("收到空的列名列表，忽略")
+		return
+	}
+
+	// 检查当前列名配置
+	hasAsterisk := false
+	for _, col := range w.Parameter.Columns {
+		if col == "*" {
+			hasAsterisk = true
+			break
+		}
+	}
+
+	// 如果当前配置包含星号或者未配置列名，则使用传入的列名
+	if hasAsterisk || len(w.Parameter.Columns) == 0 {
+		w.logger.Info("使用从读取器获取的实际列名: %v", strings.Join(columns, ", "))
+		w.Parameter.Columns = columns
+	} else {
+		w.logger.Debug("已有明确的列名配置，保留当前配置: %v", strings.Join(w.Parameter.Columns, ", "))
 	}
 }
 
@@ -351,7 +381,7 @@ func (w *MySQLWriter) Write(records [][]any) error {
 		return fmt.Errorf("列数不能为0，请检查配置的columns参数")
 	}
 
-	// 查询 max_allowed_packet 配置
+	// 查询 max_allowed_packet 配置以确保安全写入
 	var variableName string
 	var maxAllowedPacket int64
 	err := w.DB.QueryRow("SHOW VARIABLES LIKE 'max_allowed_packet'").Scan(&variableName, &maxAllowedPacket)
@@ -361,6 +391,43 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	}
 	w.logger.Info("当前 MySQL max_allowed_packet 配置为: %d bytes (%.2f MB)", maxAllowedPacket, float64(maxAllowedPacket)/(1024*1024))
 
+	// 计算每条记录的估计大小
+	avgFieldSize := 100  // 每个字段平均 100 字节
+	recordOverhead := 20 // 每条记录额外开销 20 字节
+	estimatedRowSize := columnsCount*avgFieldSize + recordOverhead
+
+	// 计算基于max_allowed_packet的安全行数限制
+	// 预留 20% 的空间作为安全边界
+	maxRowsPerPacket := int(float64(maxAllowedPacket) * 0.8 / float64(estimatedRowSize))
+
+	// 检查prepared statement参数数量限制 (MySQL限制为65535个参数)
+	maxParamsPerQuery := maxRowsPerPacket * columnsCount
+	if maxParamsPerQuery > 65535 {
+		maxParamsPerQuery = 65535
+		maxRowsPerPacket = maxParamsPerQuery / columnsCount
+	}
+
+	// 只有当当前批次大小超出安全限制时才调整
+	originalBatchSize := w.Parameter.BatchSize
+	if originalBatchSize > maxRowsPerPacket {
+		w.Parameter.BatchSize = maxRowsPerPacket
+		w.logger.Info("由于 MySQL max_allowed_packet 限制，调整批次大小从 %d 到 %d", originalBatchSize, w.Parameter.BatchSize)
+	}
+
+	// 确保批次大小不会太小
+	minBatchSize := 1000
+	if w.Parameter.BatchSize < minBatchSize {
+		w.Parameter.BatchSize = minBatchSize
+		w.logger.Info("批次大小(%d)过小，自动调整为%d以提升性能", originalBatchSize, w.Parameter.BatchSize)
+	}
+
+	// 使用最终确定的批次大小
+	batchSize := w.Parameter.BatchSize
+	w.logger.Info("最终使用的批次大小: %d, 预估每行大小: %d bytes, 每批次大约占用: %.2f MB",
+		batchSize,
+		estimatedRowSize,
+		float64(batchSize*estimatedRowSize)/(1024*1024))
+
 	// 开始事务
 	if err := w.StartTransaction(); err != nil {
 		return err
@@ -368,40 +435,6 @@ func (w *MySQLWriter) Write(records [][]any) error {
 
 	// 重用已构建的插入SQL前缀
 	valueTemplate := w.buildValueTemplate()
-
-	// 动态计算每个SQL语句的最大批次大小
-	// 假设每个字段平均 100 字节，每条记录额外开销 20 字节
-	// 预留 20% 的空间作为安全边界
-	avgFieldSize := 100
-	recordOverhead := 20
-	estimatedRowSize := columnsCount*avgFieldSize + recordOverhead
-	maxRowsPerPacket := int(float64(maxAllowedPacket) * 0.8 / float64(estimatedRowSize))
-
-	// 计算每个查询的最大参数数
-	maxParamsPerQuery := maxRowsPerPacket * columnsCount
-	if maxParamsPerQuery > 65535 { // MySQL 的 prepared statement 参数数量限制
-		maxParamsPerQuery = 65535
-		maxRowsPerPacket = maxParamsPerQuery / columnsCount
-	}
-
-	// 如果配置的批次大小超过了每个查询的最大行数，则使用较小的值
-	batchSize := w.Parameter.BatchSize
-	if batchSize > maxRowsPerPacket {
-		w.logger.Info("由于 MySQL max_allowed_packet 限制，调整批次大小从 %d 到 %d", batchSize, maxRowsPerPacket)
-		batchSize = maxRowsPerPacket
-	}
-
-	// 确保批次大小不会太小，影响性能
-	minBatchSize := 1000
-	if batchSize < minBatchSize {
-		w.logger.Info("批次大小(%d)过小，自动调整为%d以提升性能", batchSize, minBatchSize)
-		batchSize = minBatchSize
-	}
-
-	w.logger.Info("最终确定的批次大小为: %d, 预估每行大小: %d bytes, 每批次大约占用: %.2f MB",
-		batchSize,
-		estimatedRowSize,
-		float64(batchSize*estimatedRowSize)/(1024*1024))
 
 	// 分批处理数据
 	totalRecords := len(records)

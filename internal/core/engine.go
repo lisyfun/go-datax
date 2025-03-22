@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"datax/internal/pkg/logger"
+	"datax/internal/plugin/common"
 )
 
 // DataXEngine 数据同步引擎
@@ -128,18 +129,53 @@ func (e *DataXEngine) Start() error {
 	}
 	e.logger.Info("总记录数: %d", totalCount)
 
-	// 根据数据量动态调整批次大小
-	batchSize := calculateBatchSize(totalCount)
+	// 检查是否需要根据数据量调整批次大小
+	// 注意：上面的GetTotalCount方法可能已经调整了批次大小
+	// 这里我们仅检查配置中是否没有明确设置批次大小的情况
+	needsAdjustBatchSize := false
 
-	// 更新 Reader 和 Writer 的批次大小
+	// 检查Reader配置中是否已有批次大小
+	readerNeedsBatchSize := false
 	if rp, ok := content.Reader.Parameter.(map[string]any); ok {
-		rp["batchSize"] = batchSize
-	}
-	if wp, ok := content.Writer.Parameter.(map[string]any); ok {
-		wp["batchSize"] = batchSize
+		if _, exists := rp["batchSize"]; !exists {
+			readerNeedsBatchSize = true
+		}
 	}
 
-	e.logger.Info("根据数据量(%d)自动调整批次大小为: %d", totalCount, batchSize)
+	// 检查Writer配置中是否已有批次大小
+	writerNeedsBatchSize := false
+	if wp, ok := content.Writer.Parameter.(map[string]any); ok {
+		if _, exists := wp["batchSize"]; !exists {
+			writerNeedsBatchSize = true
+		}
+	}
+
+	// 如果Reader或Writer中任一方需要设置批次大小
+	if readerNeedsBatchSize || writerNeedsBatchSize {
+		needsAdjustBatchSize = true
+	}
+
+	// 只有在需要时才调整批次大小
+	if needsAdjustBatchSize {
+		batchSize := calculateBatchSize(totalCount)
+		e.logger.Info("根据数据量(%d)设置批次大小为: %d", totalCount, batchSize)
+
+		// 更新 Reader 和 Writer 的批次大小（仅当它们没有明确设置时）
+		if readerNeedsBatchSize {
+			if rp, ok := content.Reader.Parameter.(map[string]any); ok {
+				rp["batchSize"] = batchSize
+			}
+		}
+
+		if writerNeedsBatchSize {
+			if wp, ok := content.Writer.Parameter.(map[string]any); ok {
+				wp["batchSize"] = batchSize
+			}
+		}
+	}
+
+	// 尝试传递列名信息（如果支持）
+	e.tryTransferColumns()
 
 	// 执行预处理
 	e.logger.Info("开始执行预处理操作...")
@@ -210,6 +246,34 @@ func (e *DataXEngine) Start() error {
 		elapsed, processedCount, errorCount, speed)
 
 	return nil
+}
+
+// tryTransferColumns 尝试从Reader向Writer传递列信息
+func (e *DataXEngine) tryTransferColumns() {
+	// 从Reader获取列名信息
+	columnProvider, isColumnProvider := e.reader.(common.ColumnProvider)
+	if !isColumnProvider {
+		e.logger.Debug("Reader不支持列名提供功能")
+		return
+	}
+
+	// 获取Writer的列名设置能力
+	columnAwareWriter, isColumnAwareWriter := e.writer.(common.ColumnAwareWriter)
+	if !isColumnAwareWriter {
+		e.logger.Debug("Writer不支持列名感知功能")
+		return
+	}
+
+	// 获取实际列名并传递给Writer
+	actualColumns := columnProvider.GetActualColumns()
+	if len(actualColumns) == 0 {
+		e.logger.Debug("从Reader获取的列名为空")
+		return
+	}
+
+	e.logger.Info("从Reader获取实际列名: %v", actualColumns)
+	columnAwareWriter.SetColumns(actualColumns)
+	e.logger.Info("成功将列名信息从Reader传递到Writer")
 }
 
 // calculateBatchSize 根据数据总量计算合适的批次大小

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"datax/internal/pkg/logger"
+	"datax/internal/plugin/common"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -41,6 +42,9 @@ type MySQLReader struct {
 	offset    int // 用于记录当前读取位置
 	logger    *logger.Logger
 }
+
+// Ensure MySQLReader implements ColumnAwareReader
+var _ common.ColumnAwareReader = (*MySQLReader)(nil)
 
 // NewMySQLReader 创建新的MySQL读取器实例
 func NewMySQLReader(parameter *Parameter) *MySQLReader {
@@ -109,10 +113,67 @@ func (r *MySQLReader) Connect() error {
 	return nil
 }
 
+// getTableColumns 获取表的所有列名
+func (r *MySQLReader) getTableColumns() ([]string, error) {
+	// 构建查询列名的SQL
+	query := fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s' ORDER BY ORDINAL_POSITION",
+		r.Parameter.Database,
+		r.Parameter.Table)
+
+	// 执行查询
+	rows, err := r.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("查询表结构失败: %v", err)
+	}
+	defer rows.Close()
+
+	// 收集列名
+	var columns []string
+	for rows.Next() {
+		var columnName string
+		if err := rows.Scan(&columnName); err != nil {
+			return nil, fmt.Errorf("读取列名失败: %v", err)
+		}
+		columns = append(columns, columnName)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历列名结果集失败: %v", err)
+	}
+
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("表 %s.%s 未找到任何列", r.Parameter.Database, r.Parameter.Table)
+	}
+
+	return columns, nil
+}
+
 // Read 读取数据
 func (r *MySQLReader) Read() ([][]any, error) {
 	if r.DB == nil {
 		return nil, fmt.Errorf("数据库连接未初始化")
+	}
+
+	// 如果使用了星号，则需要获取实际的列名
+	hasAsterisk := false
+	for _, col := range r.Parameter.Columns {
+		if col == "*" {
+			hasAsterisk = true
+			break
+		}
+	}
+
+	// 如果使用了星号且是第一次读取(offset为0)，则获取实际列名
+	if hasAsterisk && r.offset == 0 {
+		columns, err := r.getTableColumns()
+		if err != nil {
+			r.logger.Warn("获取表结构失败: %v，将继续使用星号查询", err)
+		} else {
+			// 保存实际列名，但还是使用星号查询（保持兼容性）
+			r.logger.Info("检测到通配符*，已获取表%s的全部字段: %v", r.Parameter.Table, strings.Join(columns, ", "))
+			// 更新Parameter中的列名，但仍使用*作为查询
+			r.Parameter.Columns = append([]string{"*"}, columns...)
+		}
 	}
 
 	query := r.buildQuery()
@@ -131,6 +192,12 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("获取列信息失败: %v", err)
+	}
+
+	// 如果是星号查询的第一次读取，更新Parameter中的实际列名（如果未通过信息模式获取）
+	if hasAsterisk && r.offset == 0 && len(r.Parameter.Columns) <= 1 {
+		r.Parameter.Columns = append([]string{"*"}, columns...)
+		r.logger.Info("从查询结果更新获取表%s的全部字段: %v", r.Parameter.Table, strings.Join(columns, ", "))
 	}
 
 	// 准备数据容器
@@ -308,17 +375,26 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 		return 0, fmt.Errorf("获取总记录数失败: %v", err)
 	}
 
-	// 根据总记录数动态调整批次大小
-	originalBatchSize := r.Parameter.BatchSize
-	r.Parameter.BatchSize = calculateOptimalBatchSize(totalCount)
+	// 如果批次大小过大或过小，才进行调整
+	// 避免不必要的批次大小调整，减少日志输出
+	if totalCount > 0 && (r.Parameter.BatchSize > MaxBatchSize ||
+		r.Parameter.BatchSize < MinBatchSize ||
+		(totalCount < int64(r.Parameter.BatchSize) && totalCount > MinBatchSize)) {
 
-	// 如果批次大小有变化，记录日志
-	if originalBatchSize != r.Parameter.BatchSize {
-		r.logger.Info("根据数据量(%d)自动调整批次大小: %d -> %d",
-			totalCount,
-			originalBatchSize,
-			r.Parameter.BatchSize,
-		)
+		originalBatchSize := r.Parameter.BatchSize
+		optimalBatchSize := calculateOptimalBatchSize(totalCount)
+
+		// 只有当计算出的最优批次大小与当前批次大小差异较大时才调整
+		// 差异阈值定为20%
+		if optimalBatchSize > int(float64(originalBatchSize)*1.2) ||
+			optimalBatchSize < int(float64(originalBatchSize)*0.8) {
+			r.Parameter.BatchSize = optimalBatchSize
+			r.logger.Info("根据数据量(%d)调整批次大小: %d -> %d",
+				totalCount,
+				originalBatchSize,
+				r.Parameter.BatchSize,
+			)
+		}
 	}
 
 	return totalCount, nil
@@ -378,4 +454,17 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// GetActualColumns 获取实际使用的列名（忽略星号）
+func (r *MySQLReader) GetActualColumns() []string {
+	// 如果columns包含星号，返回第二个元素开始的所有元素（这些是实际列名）
+	for i, col := range r.Parameter.Columns {
+		if col == "*" && len(r.Parameter.Columns) > i+1 {
+			return r.Parameter.Columns[i+1:]
+		}
+	}
+
+	// 如果没有星号或者没有保存实际列名，直接返回当前的columns
+	return r.Parameter.Columns
 }
