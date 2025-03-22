@@ -220,9 +220,23 @@ func (r *MySQLReader) buildQuery() string {
 	// 否则根据配置构建SQL
 	columnsStr := "*"
 	if len(r.Parameter.Columns) > 0 {
-		columnsStr = fmt.Sprintf("`%s`", r.Parameter.Columns[0])
-		for _, col := range r.Parameter.Columns[1:] {
-			columnsStr += fmt.Sprintf(",`%s`", col)
+		// 检查是否包含星号
+		hasAsterisk := false
+		for _, col := range r.Parameter.Columns {
+			if col == "*" {
+				hasAsterisk = true
+				break
+			}
+		}
+
+		// 如果包含星号，直接使用*
+		if hasAsterisk {
+			columnsStr = "*"
+		} else {
+			columnsStr = fmt.Sprintf("`%s`", r.Parameter.Columns[0])
+			for _, col := range r.Parameter.Columns[1:] {
+				columnsStr += fmt.Sprintf(",`%s`", col)
+			}
 		}
 	}
 

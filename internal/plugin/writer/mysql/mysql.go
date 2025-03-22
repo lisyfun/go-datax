@@ -272,10 +272,68 @@ func (w *MySQLWriter) buildInsertPrefix() string {
 		mode = "INSERT INTO"
 	}
 
+	// 检查columns是否包含星号
+	hasAsterisk := false
+	for _, col := range w.Parameter.Columns {
+		if col == "*" {
+			hasAsterisk = true
+			break
+		}
+	}
+
+	// 如果包含星号，需要查询表结构获取所有列名
+	if hasAsterisk {
+		columns, err := w.getTableColumns()
+		if err != nil {
+			w.logger.Error("获取表结构失败: %v", err)
+			// 发生错误时返回空的列名，上层函数会检查列数并报错
+			return fmt.Sprintf("%s %s () VALUES ", mode, w.Parameter.Table)
+		}
+
+		// 更新Parameter.Columns
+		w.Parameter.Columns = columns
+		w.logger.Info("检测到通配符*，已获取表%s的全部字段: %v", w.Parameter.Table, strings.Join(columns, ", "))
+	}
+
 	return fmt.Sprintf("%s %s (%s) VALUES ",
 		mode,
 		w.Parameter.Table,
 		strings.Join(w.Parameter.Columns, ","))
+}
+
+// getTableColumns 获取表的所有列名
+func (w *MySQLWriter) getTableColumns() ([]string, error) {
+	// 构建查询列名的SQL
+	query := fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s' ORDER BY ORDINAL_POSITION",
+		w.Parameter.Database,
+		w.Parameter.Table)
+
+	// 执行查询
+	rows, err := w.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("查询表结构失败: %v", err)
+	}
+	defer rows.Close()
+
+	// 收集列名
+	var columns []string
+	for rows.Next() {
+		var columnName string
+		if err := rows.Scan(&columnName); err != nil {
+			return nil, fmt.Errorf("读取列名失败: %v", err)
+		}
+		columns = append(columns, columnName)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历列名结果集失败: %v", err)
+	}
+
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("表 %s.%s 未找到任何列", w.Parameter.Database, w.Parameter.Table)
+	}
+
+	return columns, nil
 }
 
 // Write 写入数据
@@ -283,6 +341,9 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	if len(records) == 0 {
 		return nil
 	}
+
+	// 如果存在星号，先构建插入SQL前缀，这会更新Parameter.Columns
+	insertPrefix := w.buildInsertPrefix()
 
 	// 检查列数是否为0
 	columnsCount := len(w.Parameter.Columns)
@@ -305,8 +366,7 @@ func (w *MySQLWriter) Write(records [][]any) error {
 		return err
 	}
 
-	// 构建插入SQL前缀
-	insertPrefix := w.buildInsertPrefix()
+	// 重用已构建的插入SQL前缀
 	valueTemplate := w.buildValueTemplate()
 
 	// 动态计算每个SQL语句的最大批次大小
