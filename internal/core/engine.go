@@ -42,45 +42,19 @@ func (e *DataXEngine) Start() error {
 
 	content := e.jobConfig.Job.Content[0]
 
-	// 构建完整的配置信息
-	configInfo := struct {
-		Reader struct {
-			Name      string `json:"name"`
-			Parameter any    `json:"parameter"`
-		} `json:"reader"`
-		Writer struct {
-			Name      string `json:"name"`
-			Parameter any    `json:"parameter"`
-		} `json:"writer"`
-		Setting any `json:"setting"`
-	}{
-		Reader: struct {
-			Name      string `json:"name"`
-			Parameter any    `json:"parameter"`
-		}{
-			Name:      content.Reader.Name,
-			Parameter: content.Reader.Parameter,
-		},
-		Writer: struct {
-			Name      string `json:"name"`
-			Parameter any    `json:"parameter"`
-		}{
-			Name:      content.Writer.Name,
-			Parameter: content.Writer.Parameter,
-		},
-		Setting: e.jobConfig.Job.Setting,
+	// 打印完整的JSON配置信息
+	jobBytes, err := json.Marshal(e.jobConfig)
+	if err != nil {
+		e.logger.Warn("任务配置序列化失败: %v", err)
+	} else {
+		compactJSON := new(bytes.Buffer)
+		if err := json.Compact(compactJSON, jobBytes); err != nil {
+			e.logger.Warn("压缩JSON失败: %v", err)
+			e.logger.Info("DataXEngine 任务配置: %s", string(jobBytes))
+		} else {
+			e.logger.Info("DataXEngine 任务配置: %s", compactJSON.String())
+		}
 	}
-
-	// 打印格式化的配置信息
-	var configBuf bytes.Buffer
-	configEncoder := json.NewEncoder(&configBuf)
-	configEncoder.SetIndent("", "  ")
-	configEncoder.SetEscapeHTML(false)
-	if err := configEncoder.Encode(configInfo); err != nil {
-		return fmt.Errorf("格式化配置信息失败: %v", err)
-	}
-
-	e.logger.Info("任务配置信息:\n%s", configBuf.String())
 
 	// 创建Reader
 	factoryMutex.RLock()
@@ -127,7 +101,6 @@ func (e *DataXEngine) Start() error {
 	if err != nil {
 		return fmt.Errorf("获取总记录数失败: %v", err)
 	}
-	e.logger.Info("总记录数: %d", totalCount)
 
 	// 检查是否需要根据数据量调整批次大小
 	// 注意：上面的GetTotalCount方法可能已经调整了批次大小
@@ -158,7 +131,7 @@ func (e *DataXEngine) Start() error {
 	// 只有在需要时才调整批次大小
 	if needsAdjustBatchSize {
 		batchSize := calculateBatchSize(totalCount)
-		e.logger.Info("根据数据量(%d)设置批次大小为: %d", totalCount, batchSize)
+		e.logger.Debug("根据数据量(%d)设置批次大小为: %d", totalCount, batchSize)
 
 		// 更新 Reader 和 Writer 的批次大小（仅当它们没有明确设置时）
 		if readerNeedsBatchSize {
@@ -178,21 +151,31 @@ func (e *DataXEngine) Start() error {
 	e.tryTransferColumns()
 
 	// 执行预处理
-	e.logger.Info("开始执行预处理操作...")
+	e.logger.Info("============开始执行预处理操作============")
 	if err := e.writer.PreProcess(); err != nil {
 		return fmt.Errorf("执行预处理失败: %v", err)
 	}
-	e.logger.Info("预处理操作执行完成")
+	e.logger.Debug("============预处理操作执行完成============")
 
 	// 读取并写入数据
 	startTime := time.Now()
 	var processedCount int64
 	var errorCount int64
 
+	// 上次打印进度的时间
+	lastProgressTime := time.Now()
+	// 最短进度更新间隔（500毫秒）
+	progressInterval := 500 * time.Millisecond
+
+	// 打印数据同步开始信息
+	e.logger.Info("开始数据同步 [总记录数: %d]...", totalCount)
+
 	for {
 		// 读取一批数据
 		records, err := e.reader.Read()
 		if err != nil {
+			// 确保在返回错误前输出换行
+			fmt.Println()
 			return fmt.Errorf("读取数据失败: %v", err)
 		}
 
@@ -203,27 +186,66 @@ func (e *DataXEngine) Start() error {
 
 		// 写入数据
 		if err := e.writer.Write(records); err != nil {
+			// 确保在返回错误前输出换行
+			fmt.Println()
 			return fmt.Errorf("写入数据失败: %v", err)
 		}
 
 		processedCount += int64(len(records))
 
-		// 打印进度
-		elapsed := time.Since(startTime)
-		speed := float64(processedCount) / elapsed.Seconds()
-		progress := float64(processedCount) / float64(totalCount) * 100
-		e.logger.Info("进度: %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒",
-			progress, processedCount, totalCount, speed)
+		// 检查是否需要更新进度条
+		currentTime := time.Now()
+		if currentTime.Sub(lastProgressTime) >= progressInterval || processedCount >= totalCount {
+			// 更新上次打印时间
+			lastProgressTime = currentTime
+
+			// 计算进度
+			elapsed := time.Since(startTime)
+			speed := float64(processedCount) / elapsed.Seconds()
+			progress := float64(processedCount) / float64(totalCount) * 100
+
+			// 生成进度条
+			progressBarWidth := 40 // 进度条宽度
+			completedWidth := int(float64(progressBarWidth) * float64(processedCount) / float64(totalCount))
+			progressBar := "["
+			for i := 0; i < progressBarWidth; i++ {
+				if i < completedWidth {
+					progressBar += "="
+				} else if i == completedWidth {
+					progressBar += ">"
+				} else {
+					progressBar += " "
+				}
+			}
+			progressBar += "]"
+
+			// 计算预计剩余时间
+			var etaStr string
+			if speed > 0 && processedCount < totalCount {
+				remainingCount := totalCount - processedCount
+				etaSec := float64(remainingCount) / speed
+				eta := time.Duration(etaSec) * time.Second
+				etaStr = fmt.Sprintf("预计剩余时间: %v", eta.Round(time.Second))
+			} else {
+				etaStr = "即将完成"
+			}
+
+			// 使用\r使进度显示在同一行，不通过logger输出
+			fmt.Printf("\r同步进度: %s %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒, %s",
+				progressBar, progress, processedCount, totalCount, speed, etaStr)
+		}
 
 		// 检查是否已处理完所有数据
 		if processedCount >= totalCount {
-			e.logger.Info("已处理完所有数据，总记录数: %d", totalCount)
+			fmt.Println() // 添加换行以结束进度行
+			e.logger.Debug("已处理完所有数据，总记录数: %d", totalCount)
 			break
 		}
 
 		// 检查错误限制
 		if e.jobConfig.Job.Setting.ErrorLimit.Record > 0 &&
 			errorCount >= int64(e.jobConfig.Job.Setting.ErrorLimit.Record) {
+			fmt.Println() // 添加换行以结束进度行
 			return fmt.Errorf("错误记录数超过限制: %d", errorCount)
 		}
 	}
@@ -234,16 +256,20 @@ func (e *DataXEngine) Start() error {
 	}
 
 	// 执行后处理
-	e.logger.Info("开始执行后处理操作...")
+	e.logger.Info("============开始执行后处理操作============")
 	if err := e.writer.PostProcess(); err != nil {
 		return fmt.Errorf("执行后处理失败: %v", err)
 	}
-	e.logger.Info("后处理操作执行完成")
+	e.logger.Debug("后处理操作执行完成")
 
 	elapsed := time.Since(startTime)
 	speed := float64(processedCount) / elapsed.Seconds()
-	e.logger.Info("数据同步完成! 总耗时: %v, 处理记录数: %d, 错误记录数: %d, 平均速度: %.2f 条/秒",
-		elapsed, processedCount, errorCount, speed)
+
+	// 显示任务完成信息（精简版）
+	e.logger.Info("数据同步任务已完成 | 总耗时: %v | 记录数: %d | 速度: %.2f 条/秒",
+		elapsed.Round(time.Millisecond),
+		processedCount,
+		speed)
 
 	return nil
 }
@@ -271,9 +297,9 @@ func (e *DataXEngine) tryTransferColumns() {
 		return
 	}
 
-	e.logger.Info("从Reader获取实际列名: %v", actualColumns)
+	e.logger.Debug("从Reader获取实际列名: %v", actualColumns)
 	columnAwareWriter.SetColumns(actualColumns)
-	e.logger.Info("成功将列名信息从Reader传递到Writer")
+	e.logger.Debug("成功将列名信息从Reader传递到Writer")
 }
 
 // calculateBatchSize 根据数据总量计算合适的批次大小

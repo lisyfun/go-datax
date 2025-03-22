@@ -86,7 +86,7 @@ func (w *MySQLWriter) SetColumns(columns []string) {
 
 	// 如果当前配置包含星号或者未配置列名，则使用传入的列名
 	if hasAsterisk || len(w.Parameter.Columns) == 0 {
-		w.logger.Info("使用从读取器获取的实际列名: %v", strings.Join(columns, ", "))
+		w.logger.Debug("使用从读取器获取的实际列名: %v", strings.Join(columns, ", "))
 		w.Parameter.Columns = columns
 	} else {
 		w.logger.Debug("已有明确的列名配置，保留当前配置: %v", strings.Join(w.Parameter.Columns, ", "))
@@ -131,20 +131,21 @@ func (w *MySQLWriter) Connect() error {
 // PreProcess 预处理：执行写入前的SQL语句
 func (w *MySQLWriter) PreProcess() error {
 	if len(w.Parameter.PreSQL) == 0 {
-		w.logger.Info("没有配置预处理SQL语句")
+		w.logger.Debug("没有配置预处理SQL语句")
 		return nil
 	}
 
-	w.logger.Info("========================= 预处理SQL语句 =========================")
-	w.logger.Info("预处理SQL语句列表（共 %d 条）:", len(w.Parameter.PreSQL))
-	// 先打印所有SQL语句
-	for i, sql := range w.Parameter.PreSQL {
-		w.logger.Info("[%d] %s", i+1, sql)
-	}
-	w.logger.Info("============================================================")
+	// 简化日志输出
+	w.logger.Info("开始执行预处理SQL语句（%d条）", len(w.Parameter.PreSQL))
 
 	for i, sql := range w.Parameter.PreSQL {
-		w.logger.Info("正在执行预处理SQL[%d]: %s", i+1, sql)
+		// SQL语句太长时截断显示
+		displaySQL := sql
+		if len(displaySQL) > 100 {
+			displaySQL = displaySQL[:97] + "..."
+		}
+		// 提升为Info级别，确保显示
+		w.logger.Info("执行预处理SQL[%d]: %s", i+1, displaySQL)
 
 		if strings.Contains(strings.ToLower(sql), "select") {
 			startTime := time.Now()
@@ -178,28 +179,28 @@ func (w *MySQLWriter) PreProcess() error {
 		}
 	}
 
-	w.logger.Info("预处理SQL语句执行完成")
-	w.logger.Info("============================================================")
+	w.logger.Info("============预处理SQL语句执行完成============")
 	return nil
 }
 
 // PostProcess 后处理：执行写入后的SQL语句
 func (w *MySQLWriter) PostProcess() error {
 	if len(w.Parameter.PostSQL) == 0 {
-		w.logger.Info("没有配置后处理SQL语句")
+		w.logger.Debug("没有配置后处理SQL语句")
 		return nil
 	}
 
-	w.logger.Info("========================= 后处理SQL语句 =========================")
-	w.logger.Info("后处理SQL语句列表（共 %d 条）:", len(w.Parameter.PostSQL))
-	// 先打印所有SQL语句
-	for i, sql := range w.Parameter.PostSQL {
-		w.logger.Info("[%d] %s", i+1, sql)
-	}
-	w.logger.Info("============================================================")
+	// 简化日志输出
+	w.logger.Info("开始执行后处理SQL语句（%d条）", len(w.Parameter.PostSQL))
 
 	for i, sql := range w.Parameter.PostSQL {
-		w.logger.Info("正在执行后处理SQL[%d]: %s", i+1, sql)
+		// SQL语句太长时截断显示
+		displaySQL := sql
+		if len(displaySQL) > 100 {
+			displaySQL = displaySQL[:97] + "..."
+		}
+		// 提升为Info级别，确保显示
+		w.logger.Info("执行后处理SQL[%d]: %s", i+1, displaySQL)
 
 		startTime := time.Now()
 		if strings.Contains(strings.ToLower(sql), "select") {
@@ -217,6 +218,8 @@ func (w *MySQLWriter) PostProcess() error {
 					return fmt.Errorf("读取后处理SQL结果失败: %v", err)
 				}
 				w.logger.Info("后处理SQL[%d]查询结果: %d, 耗时: %v", i+1, count, time.Since(startTime))
+			} else {
+				w.logger.Info("后处理SQL[%d]查询无结果, 耗时: %v", i+1, time.Since(startTime))
 			}
 		} else {
 			result, err := w.DB.Exec(sql)
@@ -230,8 +233,7 @@ func (w *MySQLWriter) PostProcess() error {
 		}
 	}
 
-	w.logger.Info("后处理SQL语句执行完成")
-	w.logger.Info("============================================================")
+	w.logger.Info("============后处理SQL语句执行完成============")
 	return nil
 }
 
@@ -322,7 +324,7 @@ func (w *MySQLWriter) buildInsertPrefix() string {
 
 		// 更新Parameter.Columns
 		w.Parameter.Columns = columns
-		w.logger.Info("检测到通配符*，已获取表%s的全部字段: %v", w.Parameter.Table, strings.Join(columns, ", "))
+		w.logger.Debug("检测到通配符*，已获取表%s的全部字段: %v", w.Parameter.Table, strings.Join(columns, ", "))
 	}
 
 	return fmt.Sprintf("%s %s (%s) VALUES ",
@@ -389,7 +391,11 @@ func (w *MySQLWriter) Write(records [][]any) error {
 		w.logger.Warn("查询 max_allowed_packet 失败: %v, 将使用默认配置", err)
 		maxAllowedPacket = 4 * 1024 * 1024 // 默认使用 4MB
 	}
-	w.logger.Info("当前 MySQL max_allowed_packet 配置为: %d bytes (%.2f MB)", maxAllowedPacket, float64(maxAllowedPacket)/(1024*1024))
+
+	// 只在Debug级别记录详细的参数信息
+	w.logger.Debug("当前 MySQL max_allowed_packet 配置为: %d bytes (%.2f MB)",
+		maxAllowedPacket,
+		float64(maxAllowedPacket)/(1024*1024))
 
 	// 计算每条记录的估计大小
 	avgFieldSize := 100  // 每个字段平均 100 字节
@@ -411,22 +417,21 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	originalBatchSize := w.Parameter.BatchSize
 	if originalBatchSize > maxRowsPerPacket {
 		w.Parameter.BatchSize = maxRowsPerPacket
-		w.logger.Info("由于 MySQL max_allowed_packet 限制，调整批次大小从 %d 到 %d", originalBatchSize, w.Parameter.BatchSize)
+		w.logger.Debug("由于 MySQL 限制，调整批次大小从 %d 到 %d", originalBatchSize, w.Parameter.BatchSize)
 	}
 
 	// 确保批次大小不会太小
 	minBatchSize := 1000
 	if w.Parameter.BatchSize < minBatchSize {
 		w.Parameter.BatchSize = minBatchSize
-		w.logger.Info("批次大小(%d)过小，自动调整为%d以提升性能", originalBatchSize, w.Parameter.BatchSize)
+		w.logger.Debug("批次大小(%d)过小，自动调整为%d", originalBatchSize, w.Parameter.BatchSize)
 	}
 
 	// 使用最终确定的批次大小
 	batchSize := w.Parameter.BatchSize
-	w.logger.Info("最终使用的批次大小: %d, 预估每行大小: %d bytes, 每批次大约占用: %.2f MB",
-		batchSize,
-		estimatedRowSize,
-		float64(batchSize*estimatedRowSize)/(1024*1024))
+
+	// 只在开始写入时输出一次批次大小信息
+	w.logger.Debug("开始数据写入，批次大小: %d，总记录数: %d", batchSize, len(records))
 
 	// 开始事务
 	if err := w.StartTransaction(); err != nil {
@@ -437,10 +442,10 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	valueTemplate := w.buildValueTemplate()
 
 	// 分批处理数据
-	totalRecords := len(records)
 	processedRecords := 0
 	startTime := time.Now()
 
+	// 不打印每个批次的进度，减少日志输出
 	for i := 0; i < len(records); i += batchSize {
 		end := i + batchSize
 		if end > len(records) {
@@ -448,7 +453,6 @@ func (w *MySQLWriter) Write(records [][]any) error {
 		}
 
 		batch := records[i:end]
-		batchStartTime := time.Now()
 
 		// 构建完整的SQL语句
 		var values []string
@@ -483,24 +487,6 @@ func (w *MySQLWriter) Write(records [][]any) error {
 		}
 
 		processedRecords += int(rowsAffected)
-		batchElapsed := time.Since(batchStartTime)
-		totalElapsed := time.Since(startTime)
-
-		w.logger.Info("批次进度: %d/%d (%.1f%%), 本批次写入 %d 条记录，耗时: %v，速度: %.2f 条/秒",
-			processedRecords,
-			totalRecords,
-			float64(processedRecords)/float64(totalRecords)*100,
-			rowsAffected,
-			batchElapsed,
-			float64(rowsAffected)/batchElapsed.Seconds())
-
-		if processedRecords%50000 == 0 || processedRecords == totalRecords {
-			w.logger.Info("总进度: 已处理 %d/%d 条记录，总耗时: %v，平均速度: %.2f 条/秒",
-				processedRecords,
-				totalRecords,
-				totalElapsed,
-				float64(processedRecords)/totalElapsed.Seconds())
-		}
 	}
 
 	// 提交事务
@@ -511,6 +497,14 @@ func (w *MySQLWriter) Write(records [][]any) error {
 		}
 		return fmt.Errorf("提交事务失败: %v", err)
 	}
+
+	// 只在完成时输出一次总结信息
+	totalElapsed := time.Since(startTime)
+	avgSpeed := float64(processedRecords) / totalElapsed.Seconds()
+	w.logger.Debug("数据写入完成，总共写入: %d 条记录，总耗时: %v，平均速度: %.2f 条/秒",
+		processedRecords,
+		totalElapsed,
+		avgSpeed)
 
 	return nil
 }

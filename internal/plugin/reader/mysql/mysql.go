@@ -170,18 +170,23 @@ func (r *MySQLReader) Read() ([][]any, error) {
 			r.logger.Warn("获取表结构失败: %v，将继续使用星号查询", err)
 		} else {
 			// 保存实际列名，但还是使用星号查询（保持兼容性）
-			r.logger.Info("检测到通配符*，已获取表%s的全部字段: %v", r.Parameter.Table, strings.Join(columns, ", "))
+			r.logger.Debug("检测到通配符*，已获取表%s的全部字段: %v", r.Parameter.Table, strings.Join(columns, ", "))
 			// 更新Parameter中的列名，但仍使用*作为查询
 			r.Parameter.Columns = append([]string{"*"}, columns...)
 		}
 	}
 
 	query := r.buildQuery()
-	r.logger.Info("执行查询: %s [offset=%d, batchSize=%d]", query, r.offset, r.Parameter.BatchSize)
+
+	// 仅在第一次读取时打印查询语句
+	if r.offset == 0 {
+		r.logger.Debug("执行查询: %s [batchSize=%d]", query, r.Parameter.BatchSize)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	startTime := time.Now()
 	rows, err := r.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("执行查询失败: %v", err)
@@ -197,7 +202,7 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	// 如果是星号查询的第一次读取，更新Parameter中的实际列名（如果未通过信息模式获取）
 	if hasAsterisk && r.offset == 0 && len(r.Parameter.Columns) <= 1 {
 		r.Parameter.Columns = append([]string{"*"}, columns...)
-		r.logger.Info("从查询结果更新获取表%s的全部字段: %v", r.Parameter.Table, strings.Join(columns, ", "))
+		r.logger.Debug("从查询结果更新获取表%s的全部字段: %v", r.Parameter.Table, strings.Join(columns, ", "))
 	}
 
 	// 准备数据容器
@@ -252,10 +257,82 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	}
 
 	recordCount := len(result)
-	r.logger.Info("成功读取 %d 条记录", recordCount)
-	r.offset += recordCount
+	elapsed := time.Since(startTime)
+	newOffset := r.offset + recordCount
+
+	// 仅在首批、最后一批或每隔一定量的记录时输出日志
+	if r.offset == 0 || recordCount == 0 || recordCount < r.Parameter.BatchSize || newOffset%100000 < recordCount {
+		// 首次读取或读取完成时使用info级别，其他情况使用debug级别
+		if r.offset == 0 || recordCount == 0 || recordCount < r.Parameter.BatchSize {
+			r.logger.Info("读取数据 %d 条，累计: %d，耗时: %v，速度: %.2f 条/秒",
+				recordCount,
+				newOffset,
+				elapsed,
+				float64(recordCount)/elapsed.Seconds())
+		} else {
+			r.logger.Debug("读取数据 %d 条，累计: %d，耗时: %v，速度: %.2f 条/秒",
+				recordCount,
+				newOffset,
+				elapsed,
+				float64(recordCount)/elapsed.Seconds())
+		}
+	}
+
+	r.offset = newOffset
 
 	return result, nil
+}
+
+// getTotalCountIfNotAlreadyCalculated 获取总记录数（如果尚未计算过）
+// 这个方法用于展示进度，不会修改批次大小
+func (r *MySQLReader) getTotalCountIfNotAlreadyCalculated() (int64, error) {
+	// 直接构建计数SQL查询而不调整批次大小
+	if r.DB == nil {
+		return 0, fmt.Errorf("数据库连接未初始化")
+	}
+
+	var query string
+	if r.Parameter.SelectSQL != "" {
+		// 预处理SQL语句
+		baseSQL := strings.TrimSpace(r.Parameter.SelectSQL)
+		baseSQL = strings.ReplaceAll(baseSQL, "\n", " ")
+		baseSQL = strings.ReplaceAll(baseSQL, "\r", " ")
+
+		// 处理特殊SQL语句
+		if strings.HasPrefix(strings.ToUpper(baseSQL), "REPLACE INTO") ||
+			strings.HasPrefix(strings.ToUpper(baseSQL), "INSERT INTO") {
+			selectIndex := strings.Index(strings.ToUpper(baseSQL), "SELECT")
+			if selectIndex == -1 {
+				return 0, fmt.Errorf("无法从SQL语句中找到SELECT子句")
+			}
+			baseSQL = baseSQL[selectIndex:]
+		}
+
+		// 添加where条件
+		if r.Parameter.Where != "" {
+			whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
+			if whereIndex == -1 {
+				baseSQL += " WHERE " + r.Parameter.Where
+			} else {
+				baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
+			}
+		}
+		query = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS cnt", baseSQL)
+	} else {
+		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s`", r.Parameter.Table)
+		if r.Parameter.Where != "" {
+			query += " WHERE " + r.Parameter.Where
+		}
+	}
+
+	// 执行查询
+	var totalCount int64
+	err := r.DB.QueryRow(query).Scan(&totalCount)
+	if err != nil {
+		return 0, fmt.Errorf("获取总记录数失败: %v", err)
+	}
+
+	return totalCount, nil
 }
 
 // buildQuery 构建SQL查询语句
@@ -367,13 +444,16 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 		}
 	}
 
-	r.logger.Info("计算总记录数的SQL: %s", query)
+	r.logger.Debug("计算总记录数的SQL: %s", query)
 
 	var totalCount int64
 	err := r.DB.QueryRow(query).Scan(&totalCount)
 	if err != nil {
 		return 0, fmt.Errorf("获取总记录数失败: %v", err)
 	}
+
+	// 记录总记录数
+	r.logger.Info("数据源总记录数: %d", totalCount)
 
 	// 如果批次大小过大或过小，才进行调整
 	// 避免不必要的批次大小调整，减少日志输出
@@ -389,7 +469,7 @@ func (r *MySQLReader) GetTotalCount() (int64, error) {
 		if optimalBatchSize > int(float64(originalBatchSize)*1.2) ||
 			optimalBatchSize < int(float64(originalBatchSize)*0.8) {
 			r.Parameter.BatchSize = optimalBatchSize
-			r.logger.Info("根据数据量(%d)调整批次大小: %d -> %d",
+			r.logger.Debug("根据数据量(%d)调整批次大小: %d -> %d",
 				totalCount,
 				originalBatchSize,
 				r.Parameter.BatchSize,
