@@ -1,11 +1,14 @@
 package postgresql
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"strings"
 	"time"
+
+	"datax/internal/pkg/logger"
+	"datax/internal/plugin/common"
 
 	_ "github.com/lib/pq"
 )
@@ -23,7 +26,8 @@ type Parameter struct {
 	BatchSize int      `json:"batchSize"`
 	PreSQL    []string `json:"preSql"`    // 写入前执行的SQL
 	PostSQL   []string `json:"postSql"`   // 写入后执行的SQL
-	WriteMode string   `json:"writeMode"` // 写入模式：insert/copy
+	WriteMode string   `json:"writeMode"` // 写入模式：insert/copy/upsert
+	LogLevel  int      `json:"logLevel"`  // 日志级别
 }
 
 // PostgreSQLWriter PostgreSQL写入器结构体
@@ -31,13 +35,17 @@ type PostgreSQLWriter struct {
 	Parameter *Parameter
 	DB        *sql.DB
 	tx        *sql.Tx // 当前事务
+	logger    *logger.Logger
 }
+
+// Ensure PostgreSQLWriter implements ColumnAwareWriter
+var _ common.ColumnAwareWriter = (*PostgreSQLWriter)(nil)
 
 // NewPostgreSQLWriter 创建新的PostgreSQL写入器实例
 func NewPostgreSQLWriter(parameter *Parameter) *PostgreSQLWriter {
 	// 设置默认值
 	if parameter.BatchSize == 0 {
-		parameter.BatchSize = 1000
+		parameter.BatchSize = 10000 // 增大默认批次大小提升性能
 	}
 	if parameter.Schema == "" {
 		parameter.Schema = "public"
@@ -46,14 +54,55 @@ func NewPostgreSQLWriter(parameter *Parameter) *PostgreSQLWriter {
 		parameter.WriteMode = "insert"
 	}
 
+	// 如果没有设置日志级别，默认使用 INFO 级别
+	if parameter.LogLevel == 0 {
+		parameter.LogLevel = int(logger.LevelInfo)
+	}
+
+	// 创建日志记录器
+	l := logger.New(&logger.Option{
+		Level:     logger.Level(parameter.LogLevel),
+		Prefix:    "PostgreSQLWriter",
+		WithTime:  true,
+		WithLevel: true,
+	})
+
 	return &PostgreSQLWriter{
 		Parameter: parameter,
+		logger:    l,
+	}
+}
+
+// SetColumns 设置要写入的列名（实现ColumnAwareWriter接口）
+func (w *PostgreSQLWriter) SetColumns(columns []string) {
+	// 检查是否有意义的列名数据
+	if len(columns) == 0 {
+		w.logger.Debug("收到空的列名列表，忽略")
+		return
+	}
+
+	// 检查当前列名配置
+	hasAsterisk := false
+	for _, col := range w.Parameter.Columns {
+		if col == "*" {
+			hasAsterisk = true
+			break
+		}
+	}
+
+	// 如果当前配置包含星号或者未配置列名，则使用传入的列名
+	if hasAsterisk || len(w.Parameter.Columns) == 0 {
+		w.logger.Debug("使用从读取器获取的实际列名: %v", strings.Join(columns, ", "))
+		w.Parameter.Columns = columns
+	} else {
+		w.logger.Debug("已有明确的列名配置，保留当前配置: %v", strings.Join(w.Parameter.Columns, ", "))
 	}
 }
 
 // Connect 连接PostgreSQL数据库
 func (w *PostgreSQLWriter) Connect() error {
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+	// 在 DSN 中设置更多的连接参数
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable connect_timeout=10 statement_timeout=30000",
 		w.Parameter.Host,
 		w.Parameter.Port,
 		w.Parameter.Username,
@@ -67,13 +116,16 @@ func (w *PostgreSQLWriter) Connect() error {
 	}
 
 	// 优化连接池配置
-	db.SetMaxIdleConns(24)                  // 最小空闲连接数
-	db.SetMaxOpenConns(50)                  // 最大连接数
+	db.SetMaxIdleConns(10)                  // 最小空闲连接数
+	db.SetMaxOpenConns(20)                  // 最大连接数
 	db.SetConnMaxLifetime(time.Hour)        // 连接最大生命周期
 	db.SetConnMaxIdleTime(30 * time.Minute) // 空闲连接最大生命周期
 
 	// 测试连接
-	err = db.Ping()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = db.PingContext(ctx)
 	if err != nil {
 		return fmt.Errorf("ping PostgreSQL失败: %v", err)
 	}
@@ -85,175 +137,130 @@ func (w *PostgreSQLWriter) Connect() error {
 // PreProcess 预处理：执行写入前的SQL语句
 func (w *PostgreSQLWriter) PreProcess() error {
 	if len(w.Parameter.PreSQL) == 0 {
-		log.Println("没有配置预处理SQL语句")
+		w.logger.Debug("没有配置预处理SQL语句")
 		return nil
 	}
 
-	log.Printf("开始执行预处理SQL语句，共 %d 条", len(w.Parameter.PreSQL))
+	w.logger.Info("开始执行预处理SQL语句（%d条）", len(w.Parameter.PreSQL))
 
 	for i, sql := range w.Parameter.PreSQL {
-		log.Printf("执行预处理SQL[%d]: %s", i+1, sql)
+		displaySQL := sql
+		if len(displaySQL) > 100 {
+			displaySQL = displaySQL[:97] + "..."
+		}
+		w.logger.Info("执行预处理SQL[%d]: %s", i+1, displaySQL)
 
 		if strings.Contains(strings.ToLower(sql), "select") {
 			startTime := time.Now()
 			rows, err := w.DB.Query(sql)
 			if err != nil {
-				log.Printf("查询预处理SQL[%d]失败: %v", i+1, err)
+				w.logger.Error("查询预处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("查询预处理SQL结果失败: %v", err)
 			}
 			defer rows.Close()
 
 			if rows.Next() {
-				// 获取列信息
-				columns, err := rows.Columns()
-				if err != nil {
-					log.Printf("获取列信息失败: %v", err)
-					return fmt.Errorf("获取列信息失败: %v", err)
-				}
-
-				// 创建一个切片来存储所有列的值
-				values := make([]any, len(columns))
-				valuePtrs := make([]any, len(columns))
-				for i := range columns {
-					valuePtrs[i] = &values[i]
-				}
-
-				if err := rows.Scan(valuePtrs...); err != nil {
-					log.Printf("读取预处理SQL[%d]结果失败: %v", i+1, err)
+				var count int
+				if err := rows.Scan(&count); err != nil {
+					w.logger.Error("读取预处理SQL[%d]结果失败: %v", i+1, err)
 					return fmt.Errorf("读取预处理SQL结果失败: %v", err)
 				}
-
-				// 打印查询结果
-				resultStr := "结果: "
-				for j, col := range columns {
-					resultStr += fmt.Sprintf("%s=%v ", col, values[j])
-				}
-				log.Printf("预处理SQL[%d]查询%s, 耗时: %v", i+1, resultStr, time.Since(startTime))
+				w.logger.Info("预处理SQL[%d]查询结果: %d, 耗时: %v", i+1, count, time.Since(startTime))
 			} else {
-				log.Printf("预处理SQL[%d]查询无结果, 耗时: %v", i+1, time.Since(startTime))
+				w.logger.Info("预处理SQL[%d]查询无结果, 耗时: %v", i+1, time.Since(startTime))
 			}
 		} else {
 			startTime := time.Now()
 			result, err := w.DB.Exec(sql)
 			if err != nil {
-				log.Printf("执行预处理SQL[%d]失败: %v", i+1, err)
+				w.logger.Error("执行预处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("执行预处理SQL失败: %v", err)
 			}
 
 			rowsAffected, _ := result.RowsAffected()
-			log.Printf("预处理SQL[%d]执行成功, 影响行数: %d, 耗时: %v", i+1, rowsAffected, time.Since(startTime))
+			w.logger.Info("预处理SQL[%d]执行成功, 影响行数: %d, 耗时: %v", i+1, rowsAffected, time.Since(startTime))
 		}
 	}
 
-	log.Println("预处理SQL语句执行完成")
+	w.logger.Info("============预处理SQL语句执行完成============")
 	return nil
 }
 
 // PostProcess 后处理：执行写入后的SQL语句
 func (w *PostgreSQLWriter) PostProcess() error {
 	if len(w.Parameter.PostSQL) == 0 {
-		log.Println("没有配置后处理SQL语句")
+		w.logger.Debug("没有配置后处理SQL语句")
 		return nil
 	}
 
-	log.Printf("开始执行后处理SQL语句，共 %d 条", len(w.Parameter.PostSQL))
+	w.logger.Info("开始执行后处理SQL语句（%d条）", len(w.Parameter.PostSQL))
 
 	for i, sql := range w.Parameter.PostSQL {
-		log.Printf("执行后处理SQL[%d]: %s", i+1, sql)
+		displaySQL := sql
+		if len(displaySQL) > 100 {
+			displaySQL = displaySQL[:97] + "..."
+		}
+		w.logger.Info("执行后处理SQL[%d]: %s", i+1, displaySQL)
 
+		startTime := time.Now()
 		if strings.Contains(strings.ToLower(sql), "select") {
-			startTime := time.Now()
 			rows, err := w.DB.Query(sql)
 			if err != nil {
-				log.Printf("查询后处理SQL[%d]失败: %v", i+1, err)
+				w.logger.Error("查询后处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("查询后处理SQL结果失败: %v", err)
 			}
 			defer rows.Close()
 
 			if rows.Next() {
-				// 获取列信息
-				columns, err := rows.Columns()
-				if err != nil {
-					log.Printf("获取列信息失败: %v", err)
-					return fmt.Errorf("获取列信息失败: %v", err)
-				}
-
-				// 创建一个切片来存储所有列的值
-				values := make([]any, len(columns))
-				valuePtrs := make([]any, len(columns))
-				for i := range columns {
-					valuePtrs[i] = &values[i]
-				}
-
-				if err := rows.Scan(valuePtrs...); err != nil {
-					log.Printf("读取后处理SQL[%d]结果失败: %v", i+1, err)
+				var count int
+				if err := rows.Scan(&count); err != nil {
+					w.logger.Error("读取后处理SQL[%d]结果失败: %v", i+1, err)
 					return fmt.Errorf("读取后处理SQL结果失败: %v", err)
 				}
-
-				// 打印查询结果
-				resultStr := "结果: "
-				for j, col := range columns {
-					resultStr += fmt.Sprintf("%s=%v ", col, values[j])
-				}
-				log.Printf("后处理SQL[%d]查询%s, 耗时: %v", i+1, resultStr, time.Since(startTime))
+				w.logger.Info("后处理SQL[%d]查询结果: %d, 耗时: %v", i+1, count, time.Since(startTime))
 			} else {
-				log.Printf("后处理SQL[%d]查询无结果, 耗时: %v", i+1, time.Since(startTime))
+				w.logger.Info("后处理SQL[%d]查询无结果, 耗时: %v", i+1, time.Since(startTime))
 			}
 		} else {
-			startTime := time.Now()
 			result, err := w.DB.Exec(sql)
 			if err != nil {
-				log.Printf("执行后处理SQL[%d]失败: %v", i+1, err)
+				w.logger.Error("执行后处理SQL[%d]失败: %v", i+1, err)
 				return fmt.Errorf("执行后处理SQL失败: %v", err)
 			}
 
 			rowsAffected, _ := result.RowsAffected()
-			log.Printf("后处理SQL[%d]执行成功, 影响行数: %d, 耗时: %v", i+1, rowsAffected, time.Since(startTime))
+			w.logger.Info("后处理SQL[%d]执行成功, 影响行数: %d, 耗时: %v", i+1, rowsAffected, time.Since(startTime))
 		}
 	}
 
-	log.Println("后处理SQL语句执行完成")
+	w.logger.Info("============后处理SQL语句执行完成============")
 	return nil
 }
 
 // Write 写入数据
 func (w *PostgreSQLWriter) Write(records [][]any) error {
-	if w.DB == nil {
-		return fmt.Errorf("数据库连接未初始化")
-	}
-
 	if len(records) == 0 {
 		return nil
 	}
 
-	// 构建插入SQL
-	var columns []string
-	for _, col := range w.Parameter.Columns {
-		columns = append(columns, fmt.Sprintf("%s", col))
+	// 检查列数是否为0
+	columnsCount := len(w.Parameter.Columns)
+	if columnsCount == 0 {
+		return fmt.Errorf("列数不能为0，请检查配置的columns参数")
 	}
 
-	// 构建占位符
-	var placeholders []string
-	for i := range w.Parameter.Columns {
-		placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
+	// 确保批次大小不会太小
+	minBatchSize := 5000 // 提高最小批次大小
+	if w.Parameter.BatchSize < minBatchSize {
+		w.Parameter.BatchSize = minBatchSize
+		w.logger.Debug("批次大小过小，自动调整为%d", w.Parameter.BatchSize)
 	}
 
-	// 构建SQL语句
-	var action string
-	switch strings.ToLower(w.Parameter.WriteMode) {
-	case "update":
-		action = "UPDATE"
-	default:
-		action = "INSERT"
-	}
+	// 使用最终确定的批次大小
+	batchSize := w.Parameter.BatchSize
 
-	sql := fmt.Sprintf("%s INTO %s.%s (%s) VALUES (%s)",
-		action,
-		w.Parameter.Schema,
-		w.Parameter.Table,
-		strings.Join(columns, ","),
-		strings.Join(placeholders, ","),
-	)
+	// 只在开始写入时输出一次批次大小信息
+	w.logger.Debug("开始数据写入，批次大小: %d，总记录数: %d", batchSize, len(records))
 
 	// 开始事务
 	tx, err := w.DB.Begin()
@@ -262,111 +269,81 @@ func (w *PostgreSQLWriter) Write(records [][]any) error {
 	}
 	defer tx.Rollback()
 
-	// 准备语句
-	stmt, err := tx.Prepare(sql)
-	if err != nil {
-		return fmt.Errorf("准备语句失败: %v", err)
-	}
-	defer stmt.Close()
+	// 构建插入SQL前缀
+	insertPrefix := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES ",
+		w.Parameter.Schema,
+		w.Parameter.Table,
+		strings.Join(w.Parameter.Columns, ","))
 
-	// 批量写入数据
-	for _, record := range records {
-		// 直接使用记录中的值
-		_, err = stmt.Exec(record...)
-		if err != nil {
-			return fmt.Errorf("执行写入失败: %v", err)
+	// 构建值模板
+	placeholders := make([]string, len(w.Parameter.Columns))
+	for i := range w.Parameter.Columns {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	valueTemplate := "(" + strings.Join(placeholders, ",") + ")"
+
+	// 分批处理数据
+	processedRecords := 0
+	startTime := time.Now()
+
+	for i := 0; i < len(records); i += batchSize {
+		end := i + batchSize
+		if end > len(records) {
+			end = len(records)
 		}
+
+		batch := records[i:end]
+
+		// 构建完整的SQL语句
+		var values []string
+		var args []any
+
+		for _, record := range batch {
+			values = append(values, valueTemplate)
+			args = append(args, record...)
+		}
+
+		sql := insertPrefix + strings.Join(values, ",")
+
+		// 执行SQL
+		result, err := tx.Exec(sql, args...)
+		if err != nil {
+			w.logger.Error("执行SQL失败: %v", err)
+			return fmt.Errorf("执行SQL失败: %v", err)
+		}
+
+		// 获取影响的行数
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			w.logger.Error("获取影响行数失败: %v", err)
+			return fmt.Errorf("获取影响行数失败: %v", err)
+		}
+
+		processedRecords += int(rowsAffected)
 	}
 
 	// 提交事务
-	err = tx.Commit()
-	if err != nil {
+	if err := tx.Commit(); err != nil {
+		w.logger.Error("提交事务失败: %v", err)
 		return fmt.Errorf("提交事务失败: %v", err)
 	}
 
+	// 只在完成时输出一次总结信息
+	totalElapsed := time.Since(startTime)
+	avgSpeed := float64(processedRecords) / totalElapsed.Seconds()
+	w.logger.Debug("数据写入完成，总共写入: %d 条记录，总耗时: %v，平均速度: %.2f 条/秒",
+		processedRecords,
+		totalElapsed,
+		avgSpeed)
+
 	return nil
-}
-
-// buildInsertPrefix 构建插入SQL前缀
-func (w *PostgreSQLWriter) buildInsertPrefix() string {
-	var columns []string
-	for _, col := range w.Parameter.Columns {
-		columns = append(columns, fmt.Sprintf("\"%s\"", col))
-	}
-
-	var sql string
-	switch strings.ToLower(w.Parameter.WriteMode) {
-	case "copy":
-		sql = fmt.Sprintf("COPY %s.%s (%s) FROM STDIN",
-			w.Parameter.Schema,
-			w.Parameter.Table,
-			strings.Join(columns, ","),
-		)
-	default:
-		sql = fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES ",
-			w.Parameter.Schema,
-			w.Parameter.Table,
-			strings.Join(columns, ","),
-		)
-	}
-
-	return sql
-}
-
-// buildUpdateSet 构建 UPDATE SET 子句
-func buildUpdateSet(columns []string) string {
-	var updates []string
-	for _, col := range columns {
-		if col != "id" {
-			updates = append(updates, fmt.Sprintf("\"%s\" = EXCLUDED.\"%s\"", col, col))
-		}
-	}
-	return strings.Join(updates, ", ")
 }
 
 // Close 关闭数据库连接
 func (w *PostgreSQLWriter) Close() error {
-	if w.tx != nil {
-		w.RollbackTransaction()
-	}
 	if w.DB != nil {
+		w.logger.Debug("关闭数据库连接")
 		return w.DB.Close()
-	}
-	return nil
-}
-
-// StartTransaction 开始事务
-func (w *PostgreSQLWriter) StartTransaction() error {
-	tx, err := w.DB.Begin()
-	if err != nil {
-		return fmt.Errorf("开始事务失败: %v", err)
-	}
-	w.tx = tx
-	return nil
-}
-
-// CommitTransaction 提交事务
-func (w *PostgreSQLWriter) CommitTransaction() error {
-	if w.tx == nil {
-		return fmt.Errorf("没有活动的事务")
-	}
-	err := w.tx.Commit()
-	w.tx = nil
-	if err != nil {
-		return fmt.Errorf("提交事务失败: %v", err)
-	}
-	return nil
-}
-
-// RollbackTransaction 回滚事务
-func (w *PostgreSQLWriter) RollbackTransaction() error {
-	if w.tx == nil {
-		return nil
-	}
-	err := w.tx.Rollback()
-	w.tx = nil
-	if err != nil {
-		return fmt.Errorf("回滚事务失败: %v", err)
 	}
 	return nil
 }

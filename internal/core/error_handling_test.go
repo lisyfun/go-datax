@@ -148,8 +148,8 @@ func TestErrorLimit_NoLimit(t *testing.T) {
 	config := &PipelineConfig{
 		MaxRetries:       0, // 不重试
 		ProgressInterval: 100 * time.Millisecond,
-		ErrorLimit:       0, // 不限制错误数量
-		ErrorPercentage:  0, // 不限制错误百分比
+		ErrorLimit:       -1, // 不限制错误数量
+		ErrorPercentage:  0,  // 不限制错误百分比
 	}
 
 	pipeline := NewPipeline(reader, writer, logger, config)
@@ -237,8 +237,8 @@ func TestErrorStatistics_Accuracy(t *testing.T) {
 	config := &PipelineConfig{
 		MaxRetries:       0, // 不重试
 		ProgressInterval: 100 * time.Millisecond,
-		ErrorLimit:       0, // 不限制错误
-		ErrorPercentage:  0, // 不限制错误百分比
+		ErrorLimit:       -1, // 不限制错误
+		ErrorPercentage:  0,  // 不限制错误百分比
 	}
 
 	pipeline := NewPipeline(reader, writer, logger, config)

@@ -286,6 +286,10 @@ func (p *Pipeline) writerWorker(workerID int) {
 			if err != nil {
 				// 尝试重试
 				if p.retryWriteWithWriter(writer, batch, &err) {
+					// 重试成功，更新统计信息
+					atomic.AddInt64(&p.stats.ProcessedRecords, int64(len(batch.Records)))
+					atomic.AddInt64(&p.stats.WriteBatches, 1)
+					p.logger.Debug("Writer-%d: 完成批次 %d（重试成功），记录数: %d", workerID, batch.BatchID, len(batch.Records))
 					continue
 				}
 
