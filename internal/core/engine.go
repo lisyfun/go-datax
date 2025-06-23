@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"runtime"
+	"sync/atomic"
 	"time"
 
 	"datax/internal/pkg/logger"
@@ -57,14 +59,7 @@ func (e *DataXEngine) Start() error {
 	}
 
 	// 创建Reader
-	factoryMutex.RLock()
-	readerFactory, ok := readerFactories[content.Reader.Name]
-	factoryMutex.RUnlock()
-	if !ok {
-		return fmt.Errorf("未找到Reader插件: %s", content.Reader.Name)
-	}
-
-	reader, err := readerFactory(content.Reader.Parameter)
+	reader, err := DefaultRegistry.CreateReader(content.Reader.Name, content.Reader.Parameter)
 	if err != nil {
 		return fmt.Errorf("创建Reader失败: %v", err)
 	}
@@ -72,14 +67,7 @@ func (e *DataXEngine) Start() error {
 	defer e.reader.Close()
 
 	// 创建Writer
-	factoryMutex.RLock()
-	writerFactory, ok := writerFactories[content.Writer.Name]
-	factoryMutex.RUnlock()
-	if !ok {
-		return fmt.Errorf("未找到Writer插件: %s", content.Writer.Name)
-	}
-
-	writer, err := writerFactory(content.Writer.Parameter)
+	writer, err := DefaultRegistry.CreateWriter(content.Writer.Name, content.Writer.Parameter)
 	if err != nil {
 		return fmt.Errorf("创建Writer失败: %v", err)
 	}
@@ -157,100 +145,56 @@ func (e *DataXEngine) Start() error {
 	}
 	e.logger.Debug("============预处理操作执行完成============")
 
-	// 读取并写入数据
-	startTime := time.Now()
-	var processedCount int64
-	var errorCount int64
-
-	// 上次打印进度的时间
-	lastProgressTime := time.Now()
-	// 最短进度更新间隔（500毫秒）
-	progressInterval := 500 * time.Millisecond
-
-	// 打印数据同步开始信息
-	e.logger.Info("开始数据同步 [总记录数: %d]...", totalCount)
-
-	for {
-		// 读取一批数据
-		records, err := e.reader.Read()
-		if err != nil {
-			// 确保在返回错误前输出换行
-			fmt.Println()
-			return fmt.Errorf("读取数据失败: %v", err)
-		}
-
-		// 如果没有更多数据，退出循环
-		if len(records) == 0 {
-			break
-		}
-
-		// 写入数据
-		if err := e.writer.Write(records); err != nil {
-			// 确保在返回错误前输出换行
-			fmt.Println()
-			return fmt.Errorf("写入数据失败: %v", err)
-		}
-
-		processedCount += int64(len(records))
-
-		// 检查是否需要更新进度条
-		currentTime := time.Now()
-		if currentTime.Sub(lastProgressTime) >= progressInterval || processedCount >= totalCount {
-			// 更新上次打印时间
-			lastProgressTime = currentTime
-
-			// 计算进度
-			elapsed := time.Since(startTime)
-			speed := float64(processedCount) / elapsed.Seconds()
-			progress := float64(processedCount) / float64(totalCount) * 100
-
-			// 生成进度条
-			progressBarWidth := 40 // 进度条宽度
-			completedWidth := int(float64(progressBarWidth) * float64(processedCount) / float64(totalCount))
-			progressBar := "["
-			for i := 0; i < progressBarWidth; i++ {
-				if i < completedWidth {
-					progressBar += "="
-				} else if i == completedWidth {
-					progressBar += ">"
-				} else {
-					progressBar += " "
-				}
-			}
-			progressBar += "]"
-
-			// 计算预计剩余时间
-			var etaStr string
-			if speed > 0 && processedCount < totalCount {
-				remainingCount := totalCount - processedCount
-				etaSec := float64(remainingCount) / speed
-				eta := time.Duration(etaSec) * time.Second
-				etaStr = fmt.Sprintf("预计剩余时间: %v", eta.Round(time.Second))
-			} else {
-				etaStr = "即将完成"
-			}
-
-			// 使用\r使进度显示在同一行，不通过logger输出
-			fmt.Printf("\r同步进度: %s %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒, %s",
-				progressBar, progress, processedCount, totalCount, speed, etaStr)
-		}
-
-		// 检查是否已处理完所有数据
-		if processedCount >= totalCount {
-			fmt.Println() // 添加换行以结束进度行
-			e.logger.Debug("已处理完所有数据，总记录数: %d", totalCount)
-			break
-		}
-
-		// 检查错误限制
-		if e.jobConfig.Job.Setting.ErrorLimit.Record > 0 &&
-			errorCount >= int64(e.jobConfig.Job.Setting.ErrorLimit.Record) {
-			fmt.Println() // 添加换行以结束进度行
-			return fmt.Errorf("错误记录数超过限制: %d", errorCount)
-		}
+	// 创建并发管道配置
+	pipelineConfig := &PipelineConfig{
+		BufferSize:       100, // 增大缓冲区大小提升性能
+		MaxRetries:       3,   // 最大重试次数
+		RetryInterval:    time.Second,
+		ProgressInterval: 5 * time.Second, // 进一步减少进度更新频率
+		ErrorLimit:       int64(e.jobConfig.Job.Setting.ErrorLimit.Record),
+		ErrorPercentage:  e.jobConfig.Job.Setting.ErrorLimit.Percentage,
+		WriterWorkers:    4, // 启动4个Writer工作协程
 	}
 
+	// 创建Writer工厂函数，为每个Worker创建独立的Writer实例
+	writerFactory := func() (Writer, error) {
+		writer, err := DefaultRegistry.CreateWriter(content.Writer.Name, content.Writer.Parameter)
+		if err != nil {
+			return nil, fmt.Errorf("创建Writer失败: %v", err)
+		}
+
+		// 如果Writer支持列名感知，传递列名信息
+		if columnAwareWriter, ok := writer.(common.ColumnAwareWriter); ok {
+			if columnProvider, isColumnProvider := e.reader.(common.ColumnProvider); isColumnProvider {
+				actualColumns := columnProvider.GetActualColumns()
+				if len(actualColumns) > 0 {
+					columnAwareWriter.SetColumns(actualColumns)
+				}
+			}
+		}
+
+		return writer, nil
+	}
+
+	// 创建并发数据传输管道
+	pipeline := NewPipelineWithFactory(e.reader, writerFactory, e.logger, pipelineConfig)
+
+	// 启动并发数据传输
+	startTime := time.Now()
+	if err := pipeline.Start(totalCount); err != nil {
+		return fmt.Errorf("数据同步失败: %v", err)
+	}
+
+	// 获取统计信息
+	stats := pipeline.GetStats()
+	elapsed := time.Since(startTime)
+
+	// 计算详细性能指标
+	readDuration := time.Duration(atomic.LoadInt64(&stats.currentReadTime))
+	writeDuration := time.Duration(atomic.LoadInt64(&stats.currentWriteTime))
+
 	// 验证处理记录数与总记录数
+	processedCount := stats.ProcessedRecords
 	if processedCount > totalCount {
 		e.logger.Warn("处理记录数(%d)大于总记录数(%d)，可能存在数据不一致", processedCount, totalCount)
 	}
@@ -262,14 +206,18 @@ func (e *DataXEngine) Start() error {
 	}
 	e.logger.Debug("后处理操作执行完成")
 
-	elapsed := time.Since(startTime)
-	speed := float64(processedCount) / elapsed.Seconds()
+	avgSpeed := float64(processedCount) / elapsed.Seconds()
 
-	// 显示任务完成信息（精简版）
-	e.logger.Info("数据同步任务已完成 | 总耗时: %v | 记录数: %d | 速度: %.2f 条/秒",
-		elapsed.Round(time.Millisecond),
-		processedCount,
-		speed)
+	// 显示详细的任务完成信息
+	e.logger.Info("数据同步完成!")
+	e.logger.Info("总记录数: %d, 成功: %d, 错误: %d",
+		stats.ProcessedRecords+stats.ErrorRecords, stats.ProcessedRecords, stats.ErrorRecords)
+	e.logger.Info("总耗时: %v, 平均速度: %.2f 条/秒",
+		elapsed.Round(time.Millisecond), avgSpeed)
+	e.logger.Info("读取批次: %d, 写入批次: %d",
+		stats.ReadBatches, stats.WriteBatches)
+	e.logger.Info("读取耗时: %v, 写入耗时: %v",
+		readDuration.Round(time.Millisecond), writeDuration.Round(time.Millisecond))
 
 	return nil
 }
@@ -302,18 +250,91 @@ func (e *DataXEngine) tryTransferColumns() {
 	e.logger.Debug("成功将列名信息从Reader传递到Writer")
 }
 
-// calculateBatchSize 根据数据总量计算合适的批次大小
+// calculateBatchSize 根据数据总量和系统性能计算合适的批次大小
 func calculateBatchSize(totalCount int64) int {
+	// 基础批次大小计算
+	baseBatchSize := calculateBaseBatchSize(totalCount)
+
+	// 根据系统性能调整批次大小
+	adjustedBatchSize := adjustBatchSizeForPerformance(baseBatchSize, totalCount)
+
+	// 确保批次大小在合理范围内
+	return clampBatchSize(adjustedBatchSize)
+}
+
+// calculateBaseBatchSize 根据数据总量计算基础批次大小
+func calculateBaseBatchSize(totalCount int64) int {
 	switch {
+	case totalCount <= 1000:
+		return 100 // 极小数据量
 	case totalCount <= 10000:
-		return 1000 // 小数据量使用较小批次
+		return 1000 // 小数据量
 	case totalCount <= 100000:
-		return 5000 // 中等数据量
+		return 10000 // 中等数据量
 	case totalCount <= 1000000:
-		return 10000 // 较大数据量
+		return 25000 // 较大数据量
 	case totalCount <= 10000000:
-		return 20000 // 大数据量
+		return 50000 // 大数据量
 	default:
-		return 50000 // 超大数据量
+		return 100000 // 超大数据量
 	}
+}
+
+// adjustBatchSizeForPerformance 根据系统性能调整批次大小
+func adjustBatchSizeForPerformance(baseBatchSize int, totalCount int64) int {
+	// 根据CPU核心数调整
+	cpuCount := runtime.NumCPU()
+	cpuFactor := float64(cpuCount) / 4.0 // 以4核为基准
+	if cpuFactor < 0.5 {
+		cpuFactor = 0.5 // 最小不低于50%
+	} else if cpuFactor > 2.0 {
+		cpuFactor = 2.0 // 最大不超过200%
+	}
+
+	// 根据可用内存调整（简化版本）
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	// 可用内存（MB）
+	availableMemMB := memStats.Sys / 1024 / 1024
+	memoryFactor := 1.0
+
+	if availableMemMB < 512 { // 小于512MB
+		memoryFactor = 0.5
+	} else if availableMemMB < 1024 { // 小于1GB
+		memoryFactor = 0.7
+	} else if availableMemMB < 2048 { // 小于2GB
+		memoryFactor = 0.9
+	} else if availableMemMB >= 4096 { // 大于等于4GB
+		memoryFactor = 1.5
+	}
+
+	// 根据数据量大小调整策略
+	sizeFactor := 1.0
+	if totalCount > 5000000 { // 超过500万条记录
+		sizeFactor = 1.3 // 增大批次以提高效率
+	} else if totalCount < 10000 { // 小于1万条记录
+		sizeFactor = 0.8 // 减小批次以降低延迟
+	}
+
+	// 综合调整
+	adjustedSize := float64(baseBatchSize) * cpuFactor * memoryFactor * sizeFactor
+
+	return int(adjustedSize)
+}
+
+// clampBatchSize 确保批次大小在合理范围内
+func clampBatchSize(batchSize int) int {
+	const (
+		minBatchSize = 100    // 最小批次大小
+		maxBatchSize = 200000 // 最大批次大小
+	)
+
+	if batchSize < minBatchSize {
+		return minBatchSize
+	}
+	if batchSize > maxBatchSize {
+		return maxBatchSize
+	}
+	return batchSize
 }

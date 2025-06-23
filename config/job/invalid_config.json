@@ -1,0 +1,42 @@
+{
+  "job": {
+    "content": [
+      {
+        "reader": {
+          "name": "mysqlreader",
+          "parameter": {
+            "username": "root",
+            "password": "123456",
+            "host": "localhost",
+            "port": -1,
+            "database": "datax_source",
+            "table": "users",
+            "columns": ["*"],
+            "batchSize": -100
+          }
+        },
+        "writer": {
+          "name": "unsupportedwriter",
+          "parameter": {
+            "username": "root",
+            "password": "123456",
+            "host": "localhost",
+            "port": 13306,
+            "database": "datax_target",
+            "table": "users"
+          }
+        }
+      }
+    ],
+    "setting": {
+      "speed": {
+        "channel": -1,
+        "bytes": -1
+      },
+      "errorLimit": {
+        "record": -1,
+        "percentage": 1.5
+      }
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "job": {
+    "content": [
+      {
+        "reader": {
+          "name": "mysqlreader",
+          "parameter": {
+            "username": "root",
+            "password": "password",
+            "host": "localhost",
+            "port": 3306,
+            "database": "test",
+            "table": "users",
+            "columns": ["*"],
+            "selectSql": "",
+            "where": "",
+            "batchSize": 1000
+          }
+        },
+        "writer": {
+          "name": "mysqlwriter",
+          "parameter": {
+            "username": "root",
+            "password": "password",
+            "host": "localhost",
+            "port": 3306,
+            "database": "test",
+            "table": "users_backup",
+            "columns": ["*"],
+            "batchSize": 1000,
+            "preSql": [],
+            "postSql": [],
+            "writeMode": "insert"
+          }
+        }
+      }
+    ],
+    "setting": {
+      "speed": {
+        "channel": 1,
+        "bytes": 1048576
+      },
+      "errorLimit": {
+        "record": 0,
+        "percentage": 0.02
+      }
+    }
+  }
+}

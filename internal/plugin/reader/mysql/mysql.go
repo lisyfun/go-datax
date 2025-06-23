@@ -30,9 +30,9 @@ type Parameter struct {
 
 // 批次大小的常量定义
 const (
-	DefaultBatchSize = 20000 // 默认批次大小
-	MinBatchSize     = 1000  // 最小批次大小
-	MaxBatchSize     = 50000 // 最大批次大小
+	DefaultBatchSize = 50000  // 默认批次大小（提升性能）
+	MinBatchSize     = 5000   // 最小批次大小
+	MaxBatchSize     = 100000 // 最大批次大小
 )
 
 // MySQLReader MySQL读取器结构体

@@ -42,7 +42,7 @@ var _ common.ColumnAwareWriter = (*MySQLWriter)(nil)
 func NewMySQLWriter(parameter *Parameter) *MySQLWriter {
 	// 设置默认值
 	if parameter.BatchSize == 0 {
-		parameter.BatchSize = 1000
+		parameter.BatchSize = 10000 // 增大默认批次大小提升性能
 	}
 	if parameter.WriteMode == "" {
 		parameter.WriteMode = "insert"
@@ -421,7 +421,7 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	}
 
 	// 确保批次大小不会太小
-	minBatchSize := 1000
+	minBatchSize := 5000 // 提高最小批次大小
 	if w.Parameter.BatchSize < minBatchSize {
 		w.Parameter.BatchSize = minBatchSize
 		w.logger.Debug("批次大小(%d)过小，自动调整为%d", originalBatchSize, w.Parameter.BatchSize)

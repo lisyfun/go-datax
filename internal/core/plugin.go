@@ -33,20 +33,6 @@ var (
 	factoryMutex    sync.RWMutex
 )
 
-// RegisterReader 注册Reader工厂函数
-func RegisterReader(name string, factory ReaderFactory) {
-	factoryMutex.Lock()
-	defer factoryMutex.Unlock()
-	readerFactories[name] = factory
-}
-
-// RegisterWriter 注册Writer工厂函数
-func RegisterWriter(name string, factory WriterFactory) {
-	factoryMutex.Lock()
-	defer factoryMutex.Unlock()
-	writerFactories[name] = factory
-}
-
 // JobConfig 任务配置结构体
 type JobConfig struct {
 	Job struct {
