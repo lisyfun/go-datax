@@ -1,0 +1,54 @@
+{
+  "job": {
+    "content": [
+      {
+        "reader": {
+          "name": "mysqlreader",
+          "parameter": {
+            "username": "root",
+            "password": "123456",
+            "host": "localhost",
+            "port": 13306,
+            "database": "datax_source",
+            "table": "users",
+            "columns": ["*"],
+            "selectSql": "",
+            "where": "",
+            "batchSize": 20000,
+            "useCursor": true,
+            "primaryKey": "id",
+            "orderBy": "id"
+          }
+        },
+        "writer": {
+          "name": "mysqlwriter",
+          "parameter": {
+            "username": "root",
+            "password": "123456",
+            "host": "localhost",
+            "port": 13306,
+            "database": "datax_target",
+            "table": "users",
+            "columns": [
+              "*"
+            ],
+            "batchSize": 20000,
+            "preSql": ["select count(*) from users", "truncate users"],
+            "postSql": ["select count(*) from users"],
+            "writeMode": "replace"
+          }
+        }
+      }
+    ],
+    "setting": {
+      "speed": {
+        "channel": 24,
+        "bytes": 52428800
+      },
+      "errorLimit": {
+        "record": 0,
+        "percentage": 0.02
+      }
+    }
+  }
+}

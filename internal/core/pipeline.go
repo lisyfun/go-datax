@@ -12,9 +12,70 @@ import (
 
 // DataBatch 数据批次结构
 type DataBatch struct {
-	Records [][]any
-	BatchID int64
-	Error   error
+	Records    [][]any
+	BatchID    int64
+	Error      error
+	RetryCount int       // 重试次数
+	Timestamp  time.Time // 创建时间
+}
+
+// FailedBatchQueue 失败批次重试队列
+type FailedBatchQueue struct {
+	queue   chan *DataBatch
+	mu      sync.RWMutex
+	batches map[int64]*DataBatch // 用于去重和状态跟踪
+}
+
+// NewFailedBatchQueue 创建失败批次队列
+func NewFailedBatchQueue(size int) *FailedBatchQueue {
+	return &FailedBatchQueue{
+		queue:   make(chan *DataBatch, size),
+		batches: make(map[int64]*DataBatch),
+	}
+}
+
+// Add 添加失败的批次到重试队列
+func (q *FailedBatchQueue) Add(batch *DataBatch) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	// 检查是否已存在
+	if _, exists := q.batches[batch.BatchID]; exists {
+		return false
+	}
+
+	// 增加重试次数
+	batch.RetryCount++
+	q.batches[batch.BatchID] = batch
+
+	select {
+	case q.queue <- batch:
+		return true
+	default:
+		// 队列满了，删除记录
+		delete(q.batches, batch.BatchID)
+		return false
+	}
+}
+
+// Get 获取下一个需要重试的批次
+func (q *FailedBatchQueue) Get() *DataBatch {
+	select {
+	case batch := <-q.queue:
+		q.mu.Lock()
+		delete(q.batches, batch.BatchID)
+		q.mu.Unlock()
+		return batch
+	default:
+		return nil
+	}
+}
+
+// Size 获取队列大小
+func (q *FailedBatchQueue) Size() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return len(q.batches)
 }
 
 // Pipeline 数据传输管道
@@ -28,9 +89,10 @@ type Pipeline struct {
 	stats *PipelineStats
 
 	// 控制通道
-	dataChan  chan *DataBatch
-	errorChan chan error
-	doneChan  chan struct{}
+	dataChan   chan *DataBatch
+	errorChan  chan error
+	doneChan   chan struct{}
+	retryQueue *FailedBatchQueue // 失败重试队列
 
 	// 上下文控制
 	ctx    context.Context
@@ -51,15 +113,20 @@ type PipelineConfig struct {
 	ErrorLimit       int64         // 错误限制
 	ErrorPercentage  float64       // 错误百分比限制
 	WriterWorkers    int           // Writer工作协程数量
+	RetryQueueSize   int           // 重试队列大小
+	MaxBatchRetries  int           // 单个批次最大重试次数
+	EnableDataCheck  bool          // 是否启用数据完整性检查
 }
 
 // PipelineStats 管道统计信息
 type PipelineStats struct {
-	TotalRecords     int64
-	ProcessedRecords int64
-	ErrorRecords     int64
-	ReadBatches      int64
-	WriteBatches     int64
+	TotalRecords       int64
+	ProcessedRecords   int64
+	ErrorRecords       int64
+	ReadBatches        int64
+	WriteBatches       int64
+	RetriedBatches     int64 // 重试的批次数
+	FinalFailedBatches int64 // 最终失败的批次数
 
 	StartTime        time.Time
 	LastProgressTime time.Time
@@ -90,7 +157,18 @@ func NewPipelineWithFactory(reader Reader, writerFactory func() (Writer, error),
 			ErrorLimit:       -1,              // -1 表示不限制错误数
 			ErrorPercentage:  0,               // 0 表示不限制错误百分比
 			WriterWorkers:    4,               // 默认4个Writer工作协程
+			RetryQueueSize:   1000,            // 默认重试队列大小
+			MaxBatchRetries:  5,               // 默认单个批次最大重试次数
+			EnableDataCheck:  true,            // 默认启用数据完整性检查
 		}
+	}
+
+	// 设置默认值
+	if config.RetryQueueSize <= 0 {
+		config.RetryQueueSize = 1000
+	}
+	if config.MaxBatchRetries <= 0 {
+		config.MaxBatchRetries = 5
 	}
 
 	return &Pipeline{
@@ -102,6 +180,7 @@ func NewPipelineWithFactory(reader Reader, writerFactory func() (Writer, error),
 		dataChan:      make(chan *DataBatch, config.BufferSize),
 		errorChan:     make(chan error, 2),
 		doneChan:      make(chan struct{}),
+		retryQueue:    NewFailedBatchQueue(config.RetryQueueSize),
 		ctx:           ctx,
 		cancel:        cancel,
 	}
@@ -113,7 +192,8 @@ func (p *Pipeline) Start(totalRecords int64) error {
 	p.stats.StartTime = time.Now()
 	p.stats.LastProgressTime = time.Now()
 
-	p.logger.Info("启动并发数据传输管道 [缓冲区大小: %d]", p.config.BufferSize)
+	p.logger.Info("启动数据传输管道: 缓冲区 %d, Worker %d, 重试 %d, 队列 %d, 批次重试 %d",
+		p.config.BufferSize, p.config.WriterWorkers, p.config.MaxRetries, p.config.RetryQueueSize, p.config.MaxBatchRetries)
 
 	// 启动Reader goroutine
 	p.wg.Add(1)
@@ -133,6 +213,10 @@ func (p *Pipeline) Start(totalRecords int64) error {
 	p.wg.Add(1)
 	go p.progressWorker()
 
+	// 启动重试处理goroutine
+	p.wg.Add(1)
+	go p.retryWorker()
+
 	// 等待完成或错误
 	select {
 	case err := <-p.errorChan:
@@ -141,7 +225,8 @@ func (p *Pipeline) Start(totalRecords int64) error {
 		return err
 	case <-p.doneChan:
 		p.wg.Wait()
-		return nil
+		// 处理剩余的重试队列
+		return p.processRemainingRetries()
 	case <-p.ctx.Done():
 		p.wg.Wait()
 		return p.ctx.Err()
@@ -203,8 +288,10 @@ func (p *Pipeline) readerWorker() {
 
 		batchID++
 		batch := &DataBatch{
-			Records: records,
-			BatchID: batchID,
+			Records:    records,
+			BatchID:    batchID,
+			RetryCount: 0,
+			Timestamp:  time.Now(),
 		}
 
 		// 发送数据到管道
@@ -293,7 +380,21 @@ func (p *Pipeline) writerWorker(workerID int) {
 					continue
 				}
 
+				// 立即重试失败，检查是否可以加入重试队列
+				if batch.RetryCount < p.config.MaxBatchRetries {
+					if p.retryQueue.Add(batch) {
+						atomic.AddInt64(&p.stats.RetriedBatches, 1)
+						p.logger.Info("批次重试: Worker %d, 批次 %d, 重试次数 %d/%d, 状态 已加入重试队列",
+							workerID, batch.BatchID, batch.RetryCount, p.config.MaxBatchRetries)
+						continue
+					} else {
+						p.logger.Warn("批次重试失败: Worker %d, 批次 %d, 原因 重试队列已满", workerID, batch.BatchID)
+					}
+				}
+
+				// 最终失败
 				atomic.AddInt64(&p.stats.ErrorRecords, int64(len(batch.Records)))
+				atomic.AddInt64(&p.stats.FinalFailedBatches, 1)
 
 				// 检查错误限制
 				if p.checkErrorLimit() {
@@ -304,7 +405,8 @@ func (p *Pipeline) writerWorker(workerID int) {
 					return
 				}
 
-				p.logger.Warn("Writer-%d: 批次 %d 写入失败: %v", workerID, batch.BatchID, err)
+				p.logger.Error("批次最终失败: Worker %d, 批次 %d, 记录数 %d, 错误 %v",
+					workerID, batch.BatchID, len(batch.Records), err)
 				continue
 			}
 
@@ -369,41 +471,163 @@ func (p *Pipeline) updateProgress() {
 	elapsed := now.Sub(p.stats.StartTime)
 	speed := float64(processed) / elapsed.Seconds()
 
-	// 生成简化的进度条（减少字符串操作）
-	progressBarWidth := 40
-	completedWidth := int(float64(progressBarWidth) * progressPercent / 100)
-
-	// 使用更高效的字符串构建
-	progressBar := make([]byte, progressBarWidth+2)
-	progressBar[0] = '['
-	for i := 1; i <= progressBarWidth; i++ {
-		if i-1 < completedWidth {
-			progressBar[i] = '='
-		} else {
-			progressBar[i] = ' '
-		}
-	}
-	progressBar[progressBarWidth+1] = ']'
-
-	// 计算预计剩余时间（只在需要时计算）
+	// 计算预计剩余时间
 	var etaStr string
 	if speed > 0 && processed < total {
 		remainingCount := total - processed
 		etaSec := float64(remainingCount) / speed
 		eta := time.Duration(etaSec) * time.Second
-		etaStr = fmt.Sprintf("预计剩余: %v", eta.Round(time.Second))
+		etaStr = eta.Round(time.Second).String()
 	} else {
 		etaStr = "即将完成"
 	}
 
-	// 输出进度（使用\r在同一行更新）
-	fmt.Printf("\r同步进度: %s %.2f%%, 已处理: %d/%d, 速度: %.2f 条/秒, %s",
-		string(progressBar), progressPercent, processed, total, speed, etaStr)
+	// 单行输出进度信息
+	p.logger.Info("数据同步进度: 已处理 %d/%d (%.2f%%), 速度 %.2f 条/秒, 已用时间 %v, 预计剩余 %s",
+		processed, total, progressPercent, speed, elapsed.Round(time.Second), etaStr)
+}
 
-	// 如果完成，添加换行并停止进度更新
-	if processed >= total {
-		fmt.Println()
-		return
+// retryWorker 重试工作协程
+func (p *Pipeline) retryWorker() {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(p.config.RetryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// 处理重试队列中的批次
+			for {
+				batch := p.retryQueue.Get()
+				if batch == nil {
+					break // 队列为空
+				}
+
+				// 创建新的Writer实例进行重试
+				writer, err := p.writerFactory()
+				if err != nil {
+					p.logger.Error("重试时创建Writer失败: %v", err)
+					// 重新加入队列
+					if batch.RetryCount < p.config.MaxBatchRetries {
+						p.retryQueue.Add(batch)
+					}
+					continue
+				}
+
+				// 连接Writer
+				if err := writer.Connect(); err != nil {
+					p.logger.Error("重试时连接Writer失败: %v", err)
+					writer.Close()
+					// 重新加入队列
+					if batch.RetryCount < p.config.MaxBatchRetries {
+						p.retryQueue.Add(batch)
+					}
+					continue
+				}
+
+				// 尝试写入
+				err = writer.Write(batch.Records)
+				writer.Close()
+
+				if err == nil {
+					// 重试成功
+					atomic.AddInt64(&p.stats.ProcessedRecords, int64(len(batch.Records)))
+					atomic.AddInt64(&p.stats.WriteBatches, 1)
+					p.logger.Info("重试成功: 批次 %d, 记录数 %d, 重试次数 %d", batch.BatchID, len(batch.Records), batch.RetryCount)
+				} else {
+					// 重试失败，检查是否还能继续重试
+					if batch.RetryCount < p.config.MaxBatchRetries {
+						p.retryQueue.Add(batch)
+						p.logger.Warn("重试失败，继续重试: 批次 %d, 重试次数 %d/%d, 错误 %v",
+							batch.BatchID, batch.RetryCount, p.config.MaxBatchRetries, err)
+					} else {
+						// 最终失败
+						atomic.AddInt64(&p.stats.ErrorRecords, int64(len(batch.Records)))
+						atomic.AddInt64(&p.stats.FinalFailedBatches, 1)
+						p.logger.Error("重试次数已达上限，最终失败: 批次 %d, 记录数 %d, 重试次数 %d/%d, 错误 %v",
+							batch.BatchID, len(batch.Records), batch.RetryCount, p.config.MaxBatchRetries, err)
+					}
+				}
+			}
+
+		case <-p.doneChan:
+			// 主要数据传输完成，但还需要处理剩余的重试
+			p.logger.Info("主要数据传输完成，开始处理剩余重试队列")
+			return
+
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
+
+// processRemainingRetries 处理剩余的重试队列
+func (p *Pipeline) processRemainingRetries() error {
+	retryCount := p.retryQueue.Size()
+	if retryCount == 0 {
+		p.logger.Info("重试队列为空，无需处理")
+		return nil
+	}
+
+	p.logger.Info("开始处理剩余重试批次: %d 个", retryCount)
+
+	// 设置超时时间，避免无限等待
+	timeout := time.After(5 * time.Minute)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			remaining := p.retryQueue.Size()
+			if remaining > 0 {
+				p.logger.Warn("重试超时，仍有 %d 个批次未处理完成", remaining)
+				return fmt.Errorf("重试超时，仍有 %d 个批次未处理完成", remaining)
+			}
+			return nil
+
+		case <-ticker.C:
+			batch := p.retryQueue.Get()
+			if batch == nil {
+				// 队列为空，检查是否真的完成了
+				if p.retryQueue.Size() == 0 {
+					p.logger.Info("所有重试批次处理完成")
+					return nil
+				}
+				continue
+			}
+
+			// 创建Writer并重试
+			writer, err := p.writerFactory()
+			if err != nil {
+				p.logger.Error("最终重试时创建Writer失败: %v", err)
+				atomic.AddInt64(&p.stats.ErrorRecords, int64(len(batch.Records)))
+				atomic.AddInt64(&p.stats.FinalFailedBatches, 1)
+				continue
+			}
+
+			if err := writer.Connect(); err != nil {
+				p.logger.Error("最终重试时连接Writer失败: %v", err)
+				writer.Close()
+				atomic.AddInt64(&p.stats.ErrorRecords, int64(len(batch.Records)))
+				atomic.AddInt64(&p.stats.FinalFailedBatches, 1)
+				continue
+			}
+
+			err = writer.Write(batch.Records)
+			writer.Close()
+
+			if err == nil {
+				atomic.AddInt64(&p.stats.ProcessedRecords, int64(len(batch.Records)))
+				atomic.AddInt64(&p.stats.WriteBatches, 1)
+				p.logger.Info("最终重试成功: 批次 %d, 记录数 %d", batch.BatchID, len(batch.Records))
+			} else {
+				atomic.AddInt64(&p.stats.ErrorRecords, int64(len(batch.Records)))
+				atomic.AddInt64(&p.stats.FinalFailedBatches, 1)
+				p.logger.Error("最终重试失败: 批次 %d, 记录数 %d, 错误 %v", batch.BatchID, len(batch.Records), err)
+			}
+		}
 	}
 }
 

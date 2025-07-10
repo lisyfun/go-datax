@@ -501,12 +501,26 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	// 只在完成时输出一次总结信息
 	totalElapsed := time.Since(startTime)
 	avgSpeed := float64(processedRecords) / totalElapsed.Seconds()
-	w.logger.Debug("数据写入完成，总共写入: %d 条记录，总耗时: %v，平均速度: %.2f 条/秒",
-		processedRecords,
-		totalElapsed,
-		avgSpeed)
+	w.logger.Info("数据写入完成: 写入记录 %d 条, 耗时 %v, 速度 %.2f 条/秒", processedRecords, totalElapsed, avgSpeed)
 
 	return nil
+}
+
+// GetRecordCount 获取目标表的记录数，用于数据完整性检查
+func (w *MySQLWriter) GetRecordCount() (int64, error) {
+	if w.DB == nil {
+		return 0, fmt.Errorf("数据库连接未初始化")
+	}
+
+	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", w.Parameter.Table)
+
+	var count int64
+	err := w.DB.QueryRow(query).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("查询记录数失败: %v", err)
+	}
+
+	return count, nil
 }
 
 // Close 关闭数据库连接

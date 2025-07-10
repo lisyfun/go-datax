@@ -5,7 +5,6 @@
         "reader": {
           "name": "mysqlreader",
           "parameter": {
-            "batchSize": 10000,
             "columns": ["username", "email", "password", "full_name", "phone", "status", "created_at", "updated_at"],
             "database": "datax_source",
             "host": "host.docker.internal",
@@ -20,7 +19,6 @@
         "writer": {
           "name": "mysqlwriter",
           "parameter": {
-            "batchSize": 10000,
             "columns": ["username", "email", "PASSWORD", "full_name", "phone", "STATUS", "created_at", "updated_at"],
             "database": "datax_target",
             "host": "host.docker.internal",

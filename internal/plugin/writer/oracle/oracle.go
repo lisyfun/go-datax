@@ -341,6 +341,23 @@ func (w *OracleWriter) Write(records [][]any) error {
 	return nil
 }
 
+// GetRecordCount 获取目标表的记录数，用于数据完整性检查
+func (w *OracleWriter) GetRecordCount() (int64, error) {
+	if w.DB == nil {
+		return 0, fmt.Errorf("数据库连接未初始化")
+	}
+
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", w.Parameter.Schema, w.Parameter.Table)
+
+	var count int64
+	err := w.DB.QueryRow(query).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("查询记录数失败: %v", err)
+	}
+
+	return count, nil
+}
+
 // Close 关闭数据库连接
 func (w *OracleWriter) Close() error {
 	if w.DB != nil {

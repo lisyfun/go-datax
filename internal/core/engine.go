@@ -154,7 +154,10 @@ func (e *DataXEngine) Start() error {
 		ProgressInterval: 5 * time.Second, // 进一步减少进度更新频率
 		ErrorLimit:       int64(e.jobConfig.Job.Setting.ErrorLimit.Record),
 		ErrorPercentage:  e.jobConfig.Job.Setting.ErrorLimit.Percentage,
-		WriterWorkers:    4, // 启动4个Writer工作协程
+		WriterWorkers:    4,    // 启动4个Writer工作协程
+		RetryQueueSize:   2000, // 重试队列大小
+		MaxBatchRetries:  5,    // 单个批次最大重试次数
+		EnableDataCheck:  true, // 启用数据完整性检查
 	}
 
 	// 创建Writer工厂函数，为每个Worker创建独立的Writer实例
@@ -210,15 +213,22 @@ func (e *DataXEngine) Start() error {
 	avgSpeed := float64(processedCount) / elapsed.Seconds()
 
 	// 显示详细的任务完成信息
-	e.logger.Info("数据同步完成!")
-	e.logger.Info("总记录数: %d, 成功: %d, 错误: %d",
-		stats.ProcessedRecords+stats.ErrorRecords, stats.ProcessedRecords, stats.ErrorRecords)
-	e.logger.Info("总耗时: %v, 平均速度: %.2f 条/秒",
+	e.logger.Info("数据同步完成: 总记录 %d, 成功 %d, 错误 %d, 耗时 %v, 速度 %.2f 条/秒",
+		stats.ProcessedRecords+stats.ErrorRecords, stats.ProcessedRecords, stats.ErrorRecords,
 		elapsed.Round(time.Millisecond), avgSpeed)
-	e.logger.Info("读取批次: %d, 写入批次: %d",
-		stats.ReadBatches, stats.WriteBatches)
-	e.logger.Info("读取耗时: %v, 写入耗时: %v",
+	e.logger.Info("批次统计: 读取 %d, 写入 %d, 重试 %d, 失败 %d",
+		stats.ReadBatches, stats.WriteBatches, stats.RetriedBatches, stats.FinalFailedBatches)
+	e.logger.Info("性能统计: 读取耗时 %v, 写入耗时 %v",
 		readDuration.Round(time.Millisecond), writeDuration.Round(time.Millisecond))
+
+	// 数据完整性检查
+	if pipelineConfig.EnableDataCheck {
+		if err := e.performDataIntegrityCheck(totalCount, stats.ProcessedRecords); err != nil {
+			e.logger.Warn("数据完整性检查发现问题: %v", err)
+		} else {
+			e.logger.Info("数据完整性检查通过")
+		}
+	}
 
 	return nil
 }
@@ -338,4 +348,24 @@ func clampBatchSize(batchSize int) int {
 		return maxBatchSize
 	}
 	return batchSize
+}
+
+// performDataIntegrityCheck 执行数据完整性检查
+func (e *DataXEngine) performDataIntegrityCheck(expectedCount, actualCount int64) error {
+	// 基本记录数检查
+	if actualCount != expectedCount {
+		return fmt.Errorf("记录数不匹配: 期望 %d 条，实际处理 %d 条", expectedCount, actualCount)
+	}
+
+	// 如果Reader和Writer都支持记录数查询，进行更详细的检查
+	if countChecker, ok := e.writer.(interface{ GetRecordCount() (int64, error) }); ok {
+		writerCount, err := countChecker.GetRecordCount()
+		if err != nil {
+			e.logger.Warn("无法获取Writer记录数进行检查: %v", err)
+		} else if writerCount != actualCount {
+			return fmt.Errorf("Writer记录数不匹配: 期望 %d 条，Writer中实际 %d 条", actualCount, writerCount)
+		}
+	}
+
+	return nil
 }

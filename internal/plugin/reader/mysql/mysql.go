@@ -15,17 +15,20 @@ import (
 
 // Parameter MySQL读取器参数结构体
 type Parameter struct {
-	Username  string   `json:"username"`
-	Password  string   `json:"password"`
-	Host      string   `json:"host"`
-	Port      int      `json:"port"`
-	Database  string   `json:"database"`
-	Table     string   `json:"table"`
-	Columns   []string `json:"columns"`
-	Where     string   `json:"where"`
-	SelectSQL string   `json:"selectSql"`
-	BatchSize int      `json:"batchSize"`
-	LogLevel  int      `json:"logLevel"` // 日志级别
+	Username   string   `json:"username"`
+	Password   string   `json:"password"`
+	Host       string   `json:"host"`
+	Port       int      `json:"port"`
+	Database   string   `json:"database"`
+	Table      string   `json:"table"`
+	Columns    []string `json:"columns"`
+	Where      string   `json:"where"`
+	SelectSQL  string   `json:"selectSql"`
+	BatchSize  int      `json:"batchSize"`
+	LogLevel   int      `json:"logLevel"`   // 日志级别
+	PrimaryKey string   `json:"primaryKey"` // 主键字段名，用于游标分页
+	UseCursor  bool     `json:"useCursor"`  // 是否使用游标分页
+	OrderBy    string   `json:"orderBy"`    // 排序字段，用于游标分页
 }
 
 // 批次大小的常量定义
@@ -37,10 +40,12 @@ const (
 
 // MySQLReader MySQL读取器结构体
 type MySQLReader struct {
-	Parameter *Parameter
-	DB        *sql.DB
-	offset    int // 用于记录当前读取位置
-	logger    *logger.Logger
+	Parameter       *Parameter
+	DB              *sql.DB
+	offset          int // 用于记录当前读取位置
+	logger          *logger.Logger
+	lastCursorValue any  // 最后一个游标值，用于游标分页
+	isFirstRead     bool // 是否是第一次读取
 }
 
 // Ensure MySQLReader implements ColumnAwareReader
@@ -70,9 +75,10 @@ func NewMySQLReader(parameter *Parameter) *MySQLReader {
 	})
 
 	return &MySQLReader{
-		Parameter: parameter,
-		offset:    0,
-		logger:    l,
+		Parameter:   parameter,
+		offset:      0,
+		logger:      l,
+		isFirstRead: true,
 	}
 }
 
@@ -179,15 +185,24 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	query := r.buildQuery()
 
 	// 仅在第一次读取时打印查询语句
-	if r.offset == 0 {
-		r.logger.Debug("执行查询: %s [batchSize=%d]", query, r.Parameter.BatchSize)
+	if r.isFirstRead {
+		r.logger.Debug("执行查询: %s [batchSize=%d, useCursor=%v]", query, r.Parameter.BatchSize, r.Parameter.UseCursor)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	startTime := time.Now()
-	rows, err := r.DB.QueryContext(ctx, query)
+	var rows *sql.Rows
+	var err error
+
+	// 如果使用游标分页且不是第一次读取，需要传递游标值
+	if r.Parameter.UseCursor && !r.isFirstRead && r.lastCursorValue != nil {
+		rows, err = r.DB.QueryContext(ctx, query, r.lastCursorValue)
+	} else {
+		rows, err = r.DB.QueryContext(ctx, query)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("执行查询失败: %v", err)
 	}
@@ -200,7 +215,7 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	}
 
 	// 如果是星号查询的第一次读取，更新Parameter中的实际列名（如果未通过信息模式获取）
-	if hasAsterisk && r.offset == 0 && len(r.Parameter.Columns) <= 1 {
+	if hasAsterisk && r.isFirstRead && len(r.Parameter.Columns) <= 1 {
 		r.Parameter.Columns = append([]string{"*"}, columns...)
 		r.logger.Debug("从查询结果更新获取表%s的全部字段: %v", r.Parameter.Table, strings.Join(columns, ", "))
 	}
@@ -212,6 +227,26 @@ func (r *MySQLReader) Read() ([][]any, error) {
 
 	for i := range columns {
 		valuePtrs[i] = &values[i]
+	}
+
+	// 确定游标字段的索引
+	cursorFieldIndex := -1
+	if r.Parameter.UseCursor {
+		cursorField := r.Parameter.PrimaryKey
+		if cursorField == "" {
+			cursorField = r.Parameter.OrderBy
+		}
+		if cursorField == "" {
+			cursorField = "id" // 默认使用id字段
+		}
+
+		// 查找游标字段在结果集中的位置
+		for i, col := range columns {
+			if col == cursorField {
+				cursorFieldIndex = i
+				break
+			}
+		}
 	}
 
 	// 读取数据
@@ -250,6 +285,11 @@ func (r *MySQLReader) Read() ([][]any, error) {
 		}
 
 		result = append(result, row)
+
+		// 如果使用游标分页，更新游标值
+		if r.Parameter.UseCursor && cursorFieldIndex >= 0 {
+			r.lastCursorValue = values[cursorFieldIndex]
+		}
 	}
 
 	if err = rows.Err(); err != nil {
@@ -261,14 +301,15 @@ func (r *MySQLReader) Read() ([][]any, error) {
 	newOffset := r.offset + recordCount
 
 	// 仅在首批、最后一批或每隔一定量的记录时输出日志
-	if r.offset == 0 || recordCount == 0 || recordCount < r.Parameter.BatchSize || newOffset%100000 < recordCount {
+	if r.isFirstRead || recordCount == 0 || recordCount < r.Parameter.BatchSize || newOffset%100000 < recordCount {
 		// 首次读取或读取完成时使用info级别，其他情况使用debug级别
-		if r.offset == 0 || recordCount == 0 || recordCount < r.Parameter.BatchSize {
-			r.logger.Info("读取数据 %d 条，累计: %d，耗时: %v，速度: %.2f 条/秒",
-				recordCount,
-				newOffset,
-				elapsed,
-				float64(recordCount)/elapsed.Seconds())
+		if r.isFirstRead || recordCount == 0 || recordCount < r.Parameter.BatchSize {
+			pagingMode := "OFFSET"
+			if r.Parameter.UseCursor {
+				pagingMode = "CURSOR"
+			}
+			r.logger.Info("数据读取进度: 本批次 %d 条, 累计 %d 条, 耗时 %v, 速度 %.2f 条/秒, 分页模式 %s",
+				recordCount, newOffset, elapsed, float64(recordCount)/elapsed.Seconds(), pagingMode)
 		} else {
 			r.logger.Debug("读取数据 %d 条，累计: %d，耗时: %v，速度: %.2f 条/秒",
 				recordCount,
@@ -278,7 +319,9 @@ func (r *MySQLReader) Read() ([][]any, error) {
 		}
 	}
 
+	// 更新状态
 	r.offset = newOffset
+	r.isFirstRead = false
 
 	return result, nil
 }
@@ -338,30 +381,39 @@ func (r *MySQLReader) getTotalCountIfNotAlreadyCalculated() (int64, error) {
 // buildQuery 构建SQL查询语句
 func (r *MySQLReader) buildQuery() string {
 	if r.Parameter.SelectSQL != "" {
-		baseSQL := r.Parameter.SelectSQL
+		return r.buildCustomQuery()
+	}
+	return r.buildStandardQuery()
+}
 
-		// 检查是否同时存在 where 条件
-		if r.Parameter.Where != "" {
-			// 检查 selectSql 中是否已经包含 WHERE 子句
-			whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
-			if whereIndex == -1 {
-				// 如果不包含 WHERE 子句，添加 where 条件
-				baseSQL += " WHERE " + r.Parameter.Where
-			} else {
-				// 如果已包含 WHERE 子句，使用 AND 连接条件
-				baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
-			}
+// buildCustomQuery 构建自定义SQL查询
+func (r *MySQLReader) buildCustomQuery() string {
+	baseSQL := r.Parameter.SelectSQL
+
+	// 检查是否同时存在 where 条件
+	if r.Parameter.Where != "" {
+		// 检查 selectSql 中是否已经包含 WHERE 子句
+		whereIndex := strings.Index(strings.ToUpper(baseSQL), " WHERE ")
+		if whereIndex == -1 {
+			// 如果不包含 WHERE 子句，添加 where 条件
+			baseSQL += " WHERE " + r.Parameter.Where
+		} else {
+			// 如果已包含 WHERE 子句，使用 AND 连接条件
+			baseSQL = baseSQL[:whereIndex+7] + "(" + baseSQL[whereIndex+7:] + ") AND (" + r.Parameter.Where + ")"
 		}
-
-		// 添加分页
-		return fmt.Sprintf("%s LIMIT %d OFFSET %d",
-			baseSQL,
-			r.Parameter.BatchSize,
-			r.offset,
-		)
 	}
 
-	// 否则根据配置构建SQL
+	// 对于自定义SQL，暂时使用OFFSET分页（可以后续优化）
+	return fmt.Sprintf("%s LIMIT %d OFFSET %d",
+		baseSQL,
+		r.Parameter.BatchSize,
+		r.offset,
+	)
+}
+
+// buildStandardQuery 构建标准查询，支持游标分页
+func (r *MySQLReader) buildStandardQuery() string {
+	// 构建列名
 	columnsStr := "*"
 	if len(r.Parameter.Columns) > 0 {
 		// 检查是否包含星号
@@ -386,12 +438,50 @@ func (r *MySQLReader) buildQuery() string {
 
 	query := fmt.Sprintf("SELECT %s FROM `%s`", columnsStr, r.Parameter.Table)
 
+	// 构建WHERE条件
+	whereConditions := []string{}
+
+	// 添加用户自定义的WHERE条件
 	if r.Parameter.Where != "" {
-		query += " WHERE " + r.Parameter.Where
+		whereConditions = append(whereConditions, r.Parameter.Where)
 	}
 
-	// 添加分页
-	query += fmt.Sprintf(" LIMIT %d OFFSET %d", r.Parameter.BatchSize, r.offset)
+	// 如果启用游标分页且不是第一次读取
+	if r.Parameter.UseCursor && !r.isFirstRead && r.lastCursorValue != nil {
+		cursorField := r.Parameter.PrimaryKey
+		if cursorField == "" {
+			cursorField = r.Parameter.OrderBy
+		}
+		if cursorField == "" {
+			cursorField = "id" // 默认使用id字段
+		}
+
+		whereConditions = append(whereConditions, fmt.Sprintf("`%s` > ?", cursorField))
+	}
+
+	// 添加WHERE子句
+	if len(whereConditions) > 0 {
+		query += " WHERE " + strings.Join(whereConditions, " AND ")
+	}
+
+	// 添加ORDER BY子句（游标分页必需）
+	if r.Parameter.UseCursor {
+		orderField := r.Parameter.PrimaryKey
+		if orderField == "" {
+			orderField = r.Parameter.OrderBy
+		}
+		if orderField == "" {
+			orderField = "id" // 默认使用id字段
+		}
+		query += fmt.Sprintf(" ORDER BY `%s` ASC", orderField)
+	}
+
+	// 添加LIMIT子句
+	if r.Parameter.UseCursor {
+		query += fmt.Sprintf(" LIMIT %d", r.Parameter.BatchSize)
+	} else {
+		query += fmt.Sprintf(" LIMIT %d OFFSET %d", r.Parameter.BatchSize, r.offset)
+	}
 
 	return query
 }
