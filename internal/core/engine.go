@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -44,18 +45,18 @@ func (e *DataXEngine) Start() error {
 
 	content := e.jobConfig.Job.Content[0]
 
-	// 打印完整的JSON配置信息
-	jobBytes, err := json.Marshal(e.jobConfig)
-	if err != nil {
+	// 打印完整的JSON配置信息（不转义HTML字符）
+	buffer := new(bytes.Buffer)
+	encoder := json.NewEncoder(buffer)
+	encoder.SetEscapeHTML(false) // 不转义HTML字符
+	encoder.SetIndent("", "")    // 压缩格式
+
+	if err := encoder.Encode(e.jobConfig); err != nil {
 		e.logger.Warn("任务配置序列化失败: %v", err)
 	} else {
-		compactJSON := new(bytes.Buffer)
-		if err := json.Compact(compactJSON, jobBytes); err != nil {
-			e.logger.Warn("压缩JSON失败: %v", err)
-			e.logger.Info("DataXEngine 任务配置: %s", string(jobBytes))
-		} else {
-			e.logger.Info("DataXEngine 任务配置: %s", compactJSON.String())
-		}
+		// 移除末尾的换行符
+		configStr := strings.TrimSuffix(buffer.String(), "\n")
+		e.logger.Info("DataXEngine 任务配置: %s", configStr)
 	}
 
 	// 创建Reader

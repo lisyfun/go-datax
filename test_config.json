@@ -1,0 +1,49 @@
+{
+  "job": {
+    "content": [
+      {
+        "reader": {
+          "name": "mysqlreader",
+          "parameter": {
+            "batchSize": 10000,
+            "columns": ["username", "email", "password", "full_name", "phone", "status", "created_at", "updated_at"],
+            "database": "datax_source",
+            "host": "host.docker.internal",
+            "password": "123456",
+            "port": 13306,
+            "selectSql": "select username,email,password,full_name,phone,status,created_at,updated_at from users",
+            "table": "users",
+            "username": "root",
+            "where": "id > 1000 and created_at >= '2024-01-01'"
+          }
+        },
+        "writer": {
+          "name": "mysqlwriter",
+          "parameter": {
+            "batchSize": 10000,
+            "columns": ["username", "email", "PASSWORD", "full_name", "phone", "STATUS", "created_at", "updated_at"],
+            "database": "datax_target",
+            "host": "host.docker.internal",
+            "password": "123456",
+            "port": 13306,
+            "postSql": ["select count(*) from users"],
+            "preSql": ["select count(*) from users", "truncate users"],
+            "table": "users",
+            "username": "root",
+            "writeMode": "replace"
+          }
+        }
+      }
+    ],
+    "setting": {
+      "speed": {
+        "channel": 1,
+        "bytes": 1048576
+      },
+      "errorLimit": {
+        "record": 0,
+        "percentage": 0
+      }
+    }
+  }
+}
