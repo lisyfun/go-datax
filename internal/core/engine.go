@@ -48,8 +48,8 @@ func (e *DataXEngine) Start() error {
 	// 打印完整的JSON配置信息（不转义HTML字符）
 	buffer := new(bytes.Buffer)
 	encoder := json.NewEncoder(buffer)
-	encoder.SetEscapeHTML(false) // 不转义HTML字符
-	encoder.SetIndent("", "")    // 压缩格式
+	encoder.SetEscapeHTML(false) // 不转义HTML字符 >  <
+	encoder.SetIndent("", "  ")  // 格式化为2个空格缩进
 
 	if err := encoder.Encode(e.jobConfig); err != nil {
 		e.logger.Warn("任务配置序列化失败: %v", err)
