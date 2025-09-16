@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +90,12 @@ func (w *MySQLWriter) SetColumns(columns []string) {
 	if hasAsterisk || len(w.Parameter.Columns) == 0 {
 		w.logger.Debug("使用从读取器获取的实际列名: %v", strings.Join(columns, ", "))
 		w.Parameter.Columns = columns
+		
+		// 列名更新后，重新计算批次大小
+		if w.DB != nil {
+			w.logger.Info("列名已更新，重新计算批次大小")
+			w.adjustBatchSize()
+		}
 	} else {
 		w.logger.Debug("已有明确的列名配置，保留当前配置: %v", strings.Join(w.Parameter.Columns, ", "))
 	}
@@ -125,6 +133,10 @@ func (w *MySQLWriter) Connect() error {
 	}
 
 	w.DB = db
+	
+	// 连接成功后，计算并调整批次大小
+	w.adjustBatchSize()
+	
 	return nil
 }
 
@@ -281,6 +293,79 @@ func (w *MySQLWriter) RollbackTransaction() error {
 	return nil
 }
 
+// calculateSafeBatchSize 计算安全的批次大小，考虑占位符限制和数据包大小
+func (w *MySQLWriter) calculateSafeBatchSize() int {
+	// 确保列数有效
+	columnsCount := len(w.Parameter.Columns)
+	if columnsCount == 0 {
+		w.logger.Warn("列数为0，无法计算安全批次大小，使用默认值1000")
+		return 1000
+	}
+
+	// 1. 基于占位符限制计算最大批次大小
+	const maxPlaceholderLimit = 65535 // MySQL预编译语句占位符限制
+	maxBatchByPlaceholder := maxPlaceholderLimit / columnsCount
+	
+	w.logger.Debug("基于占位符限制计算的最大批次大小: %d (列数: %d)", maxBatchByPlaceholder, columnsCount)
+
+	// 2. 查询 max_allowed_packet 配置
+	var variableName string
+	var maxAllowedPacket int64
+	err := w.DB.QueryRow("SHOW VARIABLES LIKE 'max_allowed_packet'").Scan(&variableName, &maxAllowedPacket)
+	if err != nil {
+		w.logger.Warn("查询 max_allowed_packet 失败: %v, 将使用默认配置", err)
+		maxAllowedPacket = 4 * 1024 * 1024 // 默认使用 4MB
+	}
+
+	// 3. 基于数据包大小计算最大批次大小
+	avgFieldSize := 100  // 每个字段平均 100 字节
+	recordOverhead := 20 // 每条记录额外开销 20 字节
+	estimatedRowSize := columnsCount*avgFieldSize + recordOverhead
+	
+	// 预留 20% 的空间作为安全边界
+	maxBatchByPacket := int(float64(maxAllowedPacket) * 0.8 / float64(estimatedRowSize))
+	
+	w.logger.Debug("基于数据包大小计算的最大批次大小: %d (max_allowed_packet: %d bytes)",
+		maxBatchByPacket, maxAllowedPacket)
+
+	// 4. 取两者中的较小值作为安全批次大小
+	safeBatchSize := maxBatchByPlaceholder
+	if maxBatchByPacket < maxBatchByPlaceholder {
+		safeBatchSize = maxBatchByPacket
+	}
+
+	// 5. 确保不小于最小批次大小
+	const minBatchSize = 1000
+	if safeBatchSize < minBatchSize {
+		safeBatchSize = minBatchSize
+		w.logger.Debug("批次大小(%d)小于最小值，调整为%d", safeBatchSize, minBatchSize)
+	}
+
+	w.logger.Debug("最终计算的安全批次大小: %d", safeBatchSize)
+	return safeBatchSize
+}
+
+// adjustBatchSize 调整批次大小，确保不超过MySQL限制
+func (w *MySQLWriter) adjustBatchSize() {
+	// 如果列数为空，无法计算，跳过调整
+	if len(w.Parameter.Columns) == 0 {
+		w.logger.Debug("列数为空，跳过批次大小调整")
+		return
+	}
+	
+	originalBatchSize := w.Parameter.BatchSize
+	safeBatchSize := w.calculateSafeBatchSize()
+	
+	// 只有当原始批次大小大于安全批次大小时才调整
+	if originalBatchSize > safeBatchSize {
+		w.Parameter.BatchSize = safeBatchSize
+		w.logger.Info("批次大小已自动调整: %d -> %d (避免占位符超限)",
+			originalBatchSize, safeBatchSize)
+	} else {
+		w.logger.Debug("当前批次大小(%d)已在安全范围内，无需调整", originalBatchSize)
+	}
+}
+
 // buildValueTemplate 构建值模板
 func (w *MySQLWriter) buildValueTemplate() string {
 	placeholders := make([]string, len(w.Parameter.Columns))
@@ -377,58 +462,9 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	// 如果存在星号，先构建插入SQL前缀，这会更新Parameter.Columns
 	insertPrefix := w.buildInsertPrefix()
 
-	// 检查列数是否为0
-	columnsCount := len(w.Parameter.Columns)
-	if columnsCount == 0 {
-		return fmt.Errorf("列数不能为0，请检查配置的columns参数")
-	}
-
-	// 查询 max_allowed_packet 配置以确保安全写入
-	var variableName string
-	var maxAllowedPacket int64
-	err := w.DB.QueryRow("SHOW VARIABLES LIKE 'max_allowed_packet'").Scan(&variableName, &maxAllowedPacket)
-	if err != nil {
-		w.logger.Warn("查询 max_allowed_packet 失败: %v, 将使用默认配置", err)
-		maxAllowedPacket = 4 * 1024 * 1024 // 默认使用 4MB
-	}
-
-	// 只在Debug级别记录详细的参数信息
-	w.logger.Debug("当前 MySQL max_allowed_packet 配置为: %d bytes (%.2f MB)",
-		maxAllowedPacket,
-		float64(maxAllowedPacket)/(1024*1024))
-
-	// 计算每条记录的估计大小
-	avgFieldSize := 100  // 每个字段平均 100 字节
-	recordOverhead := 20 // 每条记录额外开销 20 字节
-	estimatedRowSize := columnsCount*avgFieldSize + recordOverhead
-
-	// 计算基于max_allowed_packet的安全行数限制
-	// 预留 20% 的空间作为安全边界
-	maxRowsPerPacket := int(float64(maxAllowedPacket) * 0.8 / float64(estimatedRowSize))
-
-	// 检查prepared statement参数数量限制 (MySQL限制为65535个参数)
-	maxParamsPerQuery := maxRowsPerPacket * columnsCount
-	if maxParamsPerQuery > 65535 {
-		maxParamsPerQuery = 65535
-		maxRowsPerPacket = maxParamsPerQuery / columnsCount
-	}
-
-	// 只有当当前批次大小超出安全限制时才调整
-	originalBatchSize := w.Parameter.BatchSize
-	if originalBatchSize > maxRowsPerPacket {
-		w.Parameter.BatchSize = maxRowsPerPacket
-		w.logger.Debug("由于 MySQL 限制，调整批次大小从 %d 到 %d", originalBatchSize, w.Parameter.BatchSize)
-	}
-
-	// 确保批次大小不会太小
-	minBatchSize := 5000 // 提高最小批次大小
-	if w.Parameter.BatchSize < minBatchSize {
-		w.Parameter.BatchSize = minBatchSize
-		w.logger.Debug("批次大小(%d)过小，自动调整为%d", originalBatchSize, w.Parameter.BatchSize)
-	}
-
-	// 使用最终确定的批次大小
+	// 使用已在Connect方法中调整好的批次大小
 	batchSize := w.Parameter.BatchSize
+	w.logger.Debug("使用已调整的批次大小: %d", batchSize)
 
 	// 只在开始写入时输出一次批次大小信息
 	w.logger.Debug("开始数据写入，批次大小: %d，总记录数: %d", batchSize, len(records))
@@ -454,6 +490,15 @@ func (w *MySQLWriter) Write(records [][]any) error {
 
 		batch := records[i:end]
 
+		// 验证每条记录的列数是否与配置的列数一致
+		if err := w.validateColumnCount(batch); err != nil {
+			// 尝试回滚事务
+			if rbErr := w.RollbackTransaction(); rbErr != nil {
+				w.logger.Error("回滚事务失败: %v", rbErr)
+			}
+			return err
+		}
+
 		// 构建完整的SQL语句
 		var values []string
 		var args []any
@@ -463,12 +508,43 @@ func (w *MySQLWriter) Write(records [][]any) error {
 			args = append(args, record...)
 		}
 
+		// 验证SQL参数数量是否匹配
+		if err := w.validateSQLParameters(args, len(batch)); err != nil {
+			// 尝试回滚事务
+			if rbErr := w.RollbackTransaction(); rbErr != nil {
+				w.logger.Error("回滚事务失败: %v", rbErr)
+			}
+			return err
+		}
+
 		sql := insertPrefix + strings.Join(values, ",")
 		w.logger.Debug("执行SQL: %s", sql)
 
 		// 执行SQL
 		result, err := w.tx.Exec(sql, args...)
 		if err != nil {
+			// 检查是否是参数数量不匹配的错误
+			if strings.Contains(err.Error(), "expected") && strings.Contains(err.Error(), "arguments") && strings.Contains(err.Error(), "got") {
+				// 解析错误信息，提取期望和实际的参数数量
+				expectedArgs := w.extractExpectedArgs(err.Error())
+				actualArgs := len(args)
+				
+				w.logger.Error("SQL参数数量不匹配: 期望 %d 个参数，实际提供了 %d 个参数", expectedArgs, actualArgs)
+				w.logger.Error("可能的原因: Reader和Writer的列数不一致")
+				w.logger.Error("当前Writer配置的列数: %d", len(w.Parameter.Columns))
+				w.logger.Error("当前批次大小: %d", batchSize)
+				w.logger.Error("计算得到的期望参数数: %d (列数 × 批次大小)", len(w.Parameter.Columns) * batchSize)
+				
+				// 尝试回滚事务
+				if rbErr := w.RollbackTransaction(); rbErr != nil {
+					w.logger.Error("回滚事务失败: %v", rbErr)
+				}
+				
+				return fmt.Errorf("SQL参数数量不匹配: 期望 %d 个参数，实际提供了 %d 个参数. "+
+					"这通常是因为Reader和Writer的列数不一致。请检查配置文件中的columns参数。",
+					expectedArgs, actualArgs)
+			}
+			
 			w.logger.Error("执行SQL失败: %v", err)
 			if rbErr := w.RollbackTransaction(); rbErr != nil {
 				w.logger.Error("回滚事务失败: %v", rbErr)
@@ -503,6 +579,63 @@ func (w *MySQLWriter) Write(records [][]any) error {
 	avgSpeed := float64(processedRecords) / totalElapsed.Seconds()
 	w.logger.Info("数据写入完成: 写入记录 %d 条, 耗时 %v, 速度 %.2f 条/秒", processedRecords, totalElapsed, avgSpeed)
 
+	return nil
+}
+
+// extractExpectedArgs 从错误信息中提取期望的参数数量
+func (w *MySQLWriter) extractExpectedArgs(errMsg string) int {
+	// 错误信息格式: "sql: expected 3800 arguments, got 4100"
+	re := regexp.MustCompile(`expected (\d+) arguments`)
+	matches := re.FindStringSubmatch(errMsg)
+	if len(matches) > 1 {
+		if num, err := strconv.Atoi(matches[1]); err == nil {
+			return num
+		}
+	}
+	return 0
+}
+
+// validateColumnCount 验证记录的列数是否与配置的列数一致
+func (w *MySQLWriter) validateColumnCount(records [][]any) error {
+	columnsCount := len(w.Parameter.Columns)
+	if columnsCount == 0 {
+		return fmt.Errorf("列数不能为0，请检查配置的columns参数")
+	}
+
+	for recordIndex, record := range records {
+		if len(record) != columnsCount {
+			w.logger.Error("数据列数不匹配: 记录 %d 有 %d 列，但配置了 %d 列",
+				recordIndex+1, len(record), columnsCount)
+			w.logger.Error("期望的列: %v", w.Parameter.Columns)
+			
+			return fmt.Errorf("数据列数不匹配: 记录 %d 有 %d 列，但配置了 %d 列. "+
+				"请检查Reader和Writer的列配置是否一致",
+				recordIndex+1, len(record), columnsCount)
+		}
+	}
+	
+	return nil
+}
+
+// validateSQLParameters 验证SQL参数数量是否匹配
+func (w *MySQLWriter) validateSQLParameters(args []any, batchSize int) error {
+	columnsCount := len(w.Parameter.Columns)
+	expectedParams := columnsCount * batchSize
+	actualParams := len(args)
+	
+	if expectedParams != actualParams {
+		w.logger.Error("SQL参数数量不匹配: 期望 %d 个参数，实际提供了 %d 个参数",
+			expectedParams, actualParams)
+		w.logger.Error("可能的原因: Reader和Writer的列数不一致")
+		w.logger.Error("当前Writer配置的列数: %d", columnsCount)
+		w.logger.Error("当前批次大小: %d", batchSize)
+		w.logger.Error("计算得到的期望参数数: %d (列数 × 批次大小)", expectedParams)
+		
+		return fmt.Errorf("SQL参数数量不匹配: 期望 %d 个参数，实际提供了 %d 个参数. "+
+			"这通常是因为Reader和Writer的列数不一致。请检查配置文件中的columns参数。",
+			expectedParams, actualParams)
+	}
+	
 	return nil
 }
 

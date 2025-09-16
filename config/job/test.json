@@ -1,0 +1,136 @@
+{
+  "job": {
+    "content": [
+      {
+        "reader": {
+          "name": "postgresqlreader",
+          "parameter": {
+            "batchSize": 100,
+            "columns": [
+              "cons_id",
+              "cust_id",
+              "cons_no",
+              "cons_name",
+              "cust_query_no",
+              "tmp_pay_rela_no",
+              "orgn_cons_no",
+              "cons_sort_code",
+              "elec_addr",
+              "trade_code",
+              "elec_type_code",
+              "contract_cap",
+              "run_cap",
+              "shift_no",
+              "lode_attr_code",
+              "volt_code",
+              "hec_industry_code",
+              "holiday",
+              "build_date",
+              "ps_date",
+              "cancel_date",
+              "due_date",
+              "notify_mode",
+              "settle_mode",
+              "status_code",
+              "org_no",
+              "rrio_code",
+              "chk_cycle",
+              "last_chk_date",
+              "checker_no",
+              "poweroff_code",
+              "transfer_code",
+              "mr_sect_no",
+              "note_type_code",
+              "tmp_flag",
+              "tmp_date",
+              "ppm_flag",
+              "ppm_type",
+              "user_type",
+              "urban_rural_flag",
+              "market_prop_sort"
+            ],
+            "database": "niescloud_loads",
+            "host": "host.docker.internal",
+            "password": "123456",
+            "port": 15432,
+            "schema": "public",
+            "selectSql": "select cons_id,cust_id,cons_no,cons_name,cust_query_no,tmp_pay_rela_no,orgn_cons_no,cons_sort_code,elec_addr,trade_code,elec_type_code,contract_cap,run_cap,shift_no,lode_attr_code,volt_code,hec_industry_code,holiday,build_date,ps_date,cancel_date,due_date,notify_mode,settle_mode,status_code,org_no,rrio_code,chk_cycle,last_chk_date,checker_no,poweroff_code,transfer_code,mr_sect_no,note_type_code,tmp_flag,tmp_date,ppm_flag,ppm_type,user_type,urban_rural_flag,market_prop_sort from c_cons",
+            "table": "c_cons",
+            "username": "postgres",
+            "where": "1=1"
+          }
+        },
+        "writer": {
+          "name": "mysqlwriter",
+          "parameter": {
+            "batchSize": 100,
+            "columns": [
+              "cons_id",
+              "cust_id",
+              "cons_no",
+              "cons_name",
+              "cust_query_no",
+              "tmp_pay_rela_no",
+              "orgn_cons_no",
+              "cons_sort_code",
+              "elec_addr",
+              "trade_code",
+              "elec_type_code",
+              "contract_cap",
+              "run_cap",
+              "shift_no",
+              "lode_attr_code",
+              "volt_code",
+              "hec_industry_code",
+              "holiday",
+              "build_date",
+              "ps_date",
+              "cancel_date",
+              "due_date",
+              "notify_mode",
+              "settle_mode",
+              "status_code",
+              "org_no",
+              "rrio_code",
+              "chk_cycle",
+              "last_chk_date",
+              "checker_no",
+              "poweroff_code",
+              "transfer_code",
+              "mr_sect_no",
+              "note_type_code",
+              "tmp_flag",
+              "tmp_date",
+              "urban_rural_flag",
+              "market_prop_sort"
+            ],
+            "database": "niescloud_loads",
+            "host": "host.docker.internal",
+            "password": "123456",
+            "port": 13306,
+            "postSql": [
+              "delete from c_cons where left(org_no,5) = '64407'"
+            ],
+            "preSql": [
+              "truncate table c_cons"
+            ],
+            "schema": "public",
+            "table": "c_cons",
+            "username": "root",
+            "writeMode": "replace"
+          }
+        }
+      }
+    ],
+    "setting": {
+      "speed": {
+        "channel": 24,
+        "bytes": 52428800
+      },
+      "errorLimit": {
+        "record": 0,
+        "percentage": 0.02
+      }
+    }
+  }
+}
